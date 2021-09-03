@@ -138,6 +138,15 @@ func TestMerge(t *testing.T) {
 		}
 	}
 
+	//Timestamp over future limit
+	fifthRing := func() *Desc {
+		return &Desc{
+			Ingesters: map[string]InstanceDesc{
+				"Ing 1": {Addr: "addr1", Timestamp: time.Now().Add(2*time.Hour).Unix(), State: ACTIVE, Tokens: []uint32{30, 40, 50}},
+			},
+		}
+	}
+
 	{
 		our, ch := merge(firstRing(), secondRing())
 		assert.Equal(t, expectedFirstSecondMerge(), our)
@@ -180,6 +189,12 @@ func TestMerge(t *testing.T) {
 				"Ing 1": {Addr: "addr1", Timestamp: now + 10, State: LEFT, Tokens: nil},
 			},
 		}, ch)
+	}
+
+	{
+		out, err := firstRing().Merge(fifthRing(), false)
+		assert.Empty(t, out)
+		assert.Errorf(t, err, "ingester timestamp in future")
 	}
 }
 
