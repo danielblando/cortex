@@ -355,6 +355,7 @@ func prepare(t *testing.T, numAM, numHappyAM, replicationFactor int, responseBod
 		},
 		HeartbeatTimeout:  60 * time.Minute,
 		ReplicationFactor: replicationFactor,
+		FutureTimestampLimit: 5 * time.Minute,
 	}, RingNameForServer, RingKey, nil)
 	require.NoError(t, err)
 	require.NoError(t, services.StartAndAwaitRunning(context.Background(), amRing))

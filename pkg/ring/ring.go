@@ -130,6 +130,7 @@ var (
 type Config struct {
 	KVStore              kv.Config     `yaml:"kvstore"`
 	HeartbeatTimeout     time.Duration `yaml:"heartbeat_timeout"`
+	FutureTimestampLimit time.Duration `yaml:"future_timestamp_limit"`
 	ReplicationFactor    int           `yaml:"replication_factor"`
 	ZoneAwarenessEnabled bool          `yaml:"zone_awareness_enabled"`
 
@@ -150,6 +151,7 @@ func (cfg *Config) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
 	f.DurationVar(&cfg.HeartbeatTimeout, prefix+"ring.heartbeat-timeout", time.Minute, "The heartbeat timeout after which ingesters are skipped for reads/writes. 0 = never (timeout disabled).")
 	f.IntVar(&cfg.ReplicationFactor, prefix+"distributor.replication-factor", 3, "The number of ingesters to write to and read from.")
 	f.BoolVar(&cfg.ZoneAwarenessEnabled, prefix+"distributor.zone-awareness-enabled", false, "True to enable the zone-awareness and replicate ingested samples across different availability zones.")
+	f.DurationVar(&cfg.FutureTimestampLimit, prefix+"ring.future-timestamp-limit", 5*time.Minute, "The max interval in the future allowed for ingester timestamp.")
 }
 
 type instanceInfo struct {
@@ -220,6 +222,9 @@ func NewWithStoreClientAndStrategy(cfg Config, name, key string, store kv.Client
 	if cfg.ReplicationFactor <= 0 {
 		return nil, fmt.Errorf("ReplicationFactor must be greater than zero: %d", cfg.ReplicationFactor)
 	}
+	if cfg.FutureTimestampLimit <= time.Duration(0) {
+		return nil, fmt.Errorf("FutureTimestampLimit must be greater than zero: %d", cfg.FutureTimestampLimit)
+	}
 
 	r := &Ring{
 		key:                  key,
@@ -259,6 +264,9 @@ func NewWithStoreClientAndStrategy(cfg Config, name, key string, store kv.Client
 			map[string]string{"name": name},
 		),
 	}
+
+	//Set global variable to be used by *Desc Mergeable interface
+	FutureTimestampLimit = r.cfg.FutureTimestampLimit
 
 	r.Service = services.NewBasicService(r.starting, r.loop, nil).WithName(fmt.Sprintf("%s ring client", name))
 	return r, nil

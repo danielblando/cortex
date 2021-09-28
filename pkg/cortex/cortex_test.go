@@ -64,7 +64,8 @@ func TestCortex(t *testing.T) {
 					KVStore: kv.Config{
 						Store: "inmemory",
 					},
-					ReplicationFactor: 3,
+					ReplicationFactor:    3,
+					FutureTimestampLimit: 5 * time.Minute,
 				},
 				InfNames: []string{"en0", "eth0", "lo0", "lo"},
 			},

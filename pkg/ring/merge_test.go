@@ -138,6 +138,23 @@ func TestMerge(t *testing.T) {
 		}
 	}
 
+	//Timestamp over future limit
+	fifthRing := func() *Desc {
+		return &Desc{
+			Ingesters: map[string]InstanceDesc{
+				"Ing 1": {Addr: "addr1", Timestamp: time.Now().Add(2 * time.Hour).Unix(), State: ACTIVE, Tokens: []uint32{30, 40}},
+			},
+		}
+	}
+
+	expectedFirstFifthMerge := func() *Desc {
+		return &Desc{
+			Ingesters: map[string]InstanceDesc{
+				"Ing 1": {Addr: "addr1", Timestamp: time.Now().Add(2 * time.Hour).Unix(), State: ACTIVE, Tokens: []uint32{30, 40}},
+			},
+		}
+	}
+
 	{
 		our, ch := merge(firstRing(), secondRing())
 		assert.Equal(t, expectedFirstSecondMerge(), our)
@@ -180,6 +197,19 @@ func TestMerge(t *testing.T) {
 				"Ing 1": {Addr: "addr1", Timestamp: now + 10, State: LEFT, Tokens: nil},
 			},
 		}, ch)
+	}
+
+	{ // no FutureTimestampLimit config
+		out, err := firstRing().mergeWithTime(fifthRing(), false, time.Now(), time.Duration(0))
+		assert.Equal(t, expectedFirstFifthMerge(), out)
+		assert.Empty(t, err)
+	}
+
+	{ // FutureTimestampLimit set to 5min
+		out, err := firstRing().mergeWithTime(fifthRing(), false, time.Now(), 5*time.Minute)
+		assert.Empty(t, out)
+		assert.Errorf(t, err, "ingester Ing 1 timestamp in the future")
+
 	}
 }
 
@@ -439,7 +469,7 @@ func TestMergeMissingIntoLeft(t *testing.T) {
 }
 
 func mergeLocalCAS(ring1, ring2 *Desc, nowUnixTime int64) (*Desc, *Desc) {
-	change, err := ring1.mergeWithTime(ring2, true, time.Unix(nowUnixTime, 0))
+	change, err := ring1.mergeWithTime(ring2, true, time.Unix(nowUnixTime, 0), FutureTimestampLimit)
 	if err != nil {
 		panic(err)
 	}

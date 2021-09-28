@@ -1934,6 +1934,7 @@ func TestRingUpdates(t *testing.T) {
 		KVStore:           kv.Config{Mock: inmem},
 		HeartbeatTimeout:  1 * time.Minute,
 		ReplicationFactor: 3,
+		FutureTimestampLimit: 5 * time.Minute,
 	}
 
 	ring, err := New(cfg, "test", "test", nil)
@@ -2032,6 +2033,7 @@ func TestShuffleShardWithCaching(t *testing.T) {
 		HeartbeatTimeout:     1 * time.Minute,
 		ReplicationFactor:    3,
 		ZoneAwarenessEnabled: true,
+		FutureTimestampLimit: 5 * time.Minute,
 	}
 
 	ring, err := New(cfg, "test", "test", nil)

@@ -255,6 +255,7 @@ func TestDefaultShardingStrategy(t *testing.T) {
 			cfg := ring.Config{
 				ReplicationFactor:    testData.replicationFactor,
 				HeartbeatTimeout:     time.Minute,
+				FutureTimestampLimit: 5 * time.Minute,
 				ZoneAwarenessEnabled: testData.zoneAwarenessEnabled,
 			}
 
@@ -613,6 +614,7 @@ func TestShuffleShardingStrategy(t *testing.T) {
 			cfg := ring.Config{
 				ReplicationFactor:    testData.replicationFactor,
 				HeartbeatTimeout:     time.Minute,
+				FutureTimestampLimit: 5 * time.Minute,
 				SubringCacheDisabled: true,
 			}
 

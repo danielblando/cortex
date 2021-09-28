@@ -35,6 +35,11 @@ func NewDesc() *Desc {
 	}
 }
 
+var (
+	// FutureTimestampLimit to be used by *Desc in Mergeable interface. It is set by ring
+	FutureTimestampLimit time.Duration
+)
+
 // AddIngester adds the given ingester to the ring. Ingester will only use supplied tokens,
 // any other tokens are removed.
 func (d *Desc) AddIngester(id, addr, zone string, tokens []uint32, state InstanceState, registeredAt time.Time) InstanceDesc {
@@ -163,10 +168,10 @@ func (i *InstanceDesc) IsHeartbeatHealthy(heartbeatTimeout time.Duration, now ti
 //
 // This method is part of memberlist.Mergeable interface, and is only used by gossiping ring.
 func (d *Desc) Merge(mergeable memberlist.Mergeable, localCAS bool) (memberlist.Mergeable, error) {
-	return d.mergeWithTime(mergeable, localCAS, time.Now())
+	return d.mergeWithTime(mergeable, localCAS, time.Now(), FutureTimestampLimit)
 }
 
-func (d *Desc) mergeWithTime(mergeable memberlist.Mergeable, localCAS bool, now time.Time) (memberlist.Mergeable, error) {
+func (d *Desc) mergeWithTime(mergeable memberlist.Mergeable, localCAS bool, now time.Time, futureTimestampLimit time.Duration) (memberlist.Mergeable, error) {
 	if mergeable == nil {
 		return nil, nil
 	}
@@ -179,6 +184,16 @@ func (d *Desc) mergeWithTime(mergeable memberlist.Mergeable, localCAS bool, now 
 
 	if other == nil {
 		return nil, nil
+	}
+
+	// If config is set, do not accept timestamp in the future beyond tolerance
+	if futureTimestampLimit > time.Duration(0) {
+		maxFutureLimit := now.Add(futureTimestampLimit).Unix()
+		for name, oing := range other.Ingesters {
+			if oing.Timestamp > maxFutureLimit {
+				return nil, fmt.Errorf("ingester %s timestamp in the future, expected max of %d, got %d", name, maxFutureLimit, oing.Timestamp)
+			}
+		}
 	}
 
 	thisIngesterMap := buildNormalizedIngestersMap(d)

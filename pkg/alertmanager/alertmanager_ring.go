@@ -45,6 +45,7 @@ type RingConfig struct {
 	KVStore              kv.Config     `yaml:"kvstore" doc:"description=The key-value store used to share the hash ring across multiple instances."`
 	HeartbeatPeriod      time.Duration `yaml:"heartbeat_period"`
 	HeartbeatTimeout     time.Duration `yaml:"heartbeat_timeout"`
+	FutureTimestampLimit time.Duration `yaml:"future_timestamp_limit"`
 	ReplicationFactor    int           `yaml:"replication_factor"`
 	ZoneAwarenessEnabled bool          `yaml:"zone_awareness_enabled"`
 
@@ -80,6 +81,7 @@ func (cfg *RingConfig) RegisterFlags(f *flag.FlagSet) {
 	f.DurationVar(&cfg.HeartbeatTimeout, rfprefix+"heartbeat-timeout", time.Minute, "The heartbeat timeout after which alertmanagers are considered unhealthy within the ring. 0 = never (timeout disabled).")
 	f.IntVar(&cfg.ReplicationFactor, rfprefix+"replication-factor", 3, "The replication factor to use when sharding the alertmanager.")
 	f.BoolVar(&cfg.ZoneAwarenessEnabled, rfprefix+"zone-awareness-enabled", false, "True to enable zone-awareness and replicate alerts across different availability zones.")
+	f.DurationVar(&cfg.FutureTimestampLimit, rfprefix+"future-timestamp-limit", 5*time.Minute, "The max interval in the future allowed for ingester timestamp.")
 
 	// Instance flags
 	cfg.InstanceInterfaceNames = []string{"eth0", "en0"}
@@ -120,6 +122,7 @@ func (cfg *RingConfig) ToRingConfig() ring.Config {
 	rc.HeartbeatTimeout = cfg.HeartbeatTimeout
 	rc.ReplicationFactor = cfg.ReplicationFactor
 	rc.ZoneAwarenessEnabled = cfg.ZoneAwarenessEnabled
+	rc.FutureTimestampLimit = cfg.FutureTimestampLimit
 
 	return rc
 }

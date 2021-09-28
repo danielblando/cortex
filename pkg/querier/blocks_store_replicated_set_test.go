@@ -340,6 +340,7 @@ func TestBlocksStoreReplicationSet_GetClientsFor(t *testing.T) {
 			ringCfg := ring.Config{}
 			flagext.DefaultValues(&ringCfg)
 			ringCfg.ReplicationFactor = testData.replicationFactor
+			ringCfg.FutureTimestampLimit = 5 * time.Minute
 
 			r, err := ring.NewWithStoreClientAndStrategy(ringCfg, "test", "test", ringStore, ring.NewIgnoreUnhealthyInstancesReplicationStrategy())
 			require.NoError(t, err)
@@ -403,6 +404,7 @@ func TestBlocksStoreReplicationSet_GetClientsFor_ShouldSupportRandomLoadBalancin
 	ringCfg := ring.Config{}
 	flagext.DefaultValues(&ringCfg)
 	ringCfg.ReplicationFactor = numInstances
+	ring.FutureTimestampLimit = 5 * time.Minute
 
 	r, err := ring.NewWithStoreClientAndStrategy(ringCfg, "test", "test", ringStore, ring.NewIgnoreUnhealthyInstancesReplicationStrategy())
 	require.NoError(t, err)

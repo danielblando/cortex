@@ -674,6 +674,10 @@ lifecycler:
     # CLI flag: -ring.heartbeat-timeout
     [heartbeat_timeout: <duration> | default = 1m]
 
+    # The max interval in the future allowed for ingester timestamp.
+    # CLI flag: -ring.future-timestamp-limit
+    [future_timestamp_limit: <duration> | default = 5m]
+
     # The number of ingesters to write to and read from.
     # CLI flag: -distributor.replication-factor
     [replication_factor: <int> | default = 3]
@@ -1923,6 +1927,10 @@ sharding_ring:
   # within the ring. 0 = never (timeout disabled).
   # CLI flag: -alertmanager.sharding-ring.heartbeat-timeout
   [heartbeat_timeout: <duration> | default = 1m]
+
+  # The max interval in the future allowed for ingester timestamp.
+  # CLI flag: -alertmanager.sharding-ring.future-timestamp-limit
+  [future_timestamp_limit: <duration> | default = 5m]
 
   # The replication factor to use when sharding the alertmanager.
   # CLI flag: -alertmanager.sharding-ring.replication-factor

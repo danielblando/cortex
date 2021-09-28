@@ -1621,9 +1621,10 @@ func BenchmarkDistributor_Push(b *testing.B) {
 			require.NoError(b, err)
 
 			ingestersRing, err := ring.New(ring.Config{
-				KVStore:           kv.Config{Mock: kvStore},
-				HeartbeatTimeout:  60 * time.Minute,
-				ReplicationFactor: 1,
+				KVStore:              kv.Config{Mock: kvStore},
+				HeartbeatTimeout:     60 * time.Minute,
+				ReplicationFactor:    1,
+				FutureTimestampLimit: 5 * time.Minute,
 			}, ring.IngesterRingKey, ring.IngesterRingKey, nil)
 			require.NoError(b, err)
 			require.NoError(b, services.StartAndAwaitRunning(context.Background(), ingestersRing))
@@ -1988,8 +1989,9 @@ func prepare(t *testing.T, cfg prepConfig) ([]*Distributor, []mockIngester, *rin
 		KVStore: kv.Config{
 			Mock: kvStore,
 		},
-		HeartbeatTimeout:  60 * time.Minute,
-		ReplicationFactor: rf,
+		HeartbeatTimeout:     60 * time.Minute,
+		ReplicationFactor:    rf,
+		FutureTimestampLimit: 5 * time.Minute,
 	}, ring.IngesterRingKey, ring.IngesterRingKey, nil)
 	require.NoError(t, err)
 	require.NoError(t, services.StartAndAwaitRunning(context.Background(), ingestersRing))
