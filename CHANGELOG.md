@@ -2,6 +2,8 @@
 
 ## master / unreleased
 
+* [CHANGE] The `status_code` on metrics from client has changed from '200' and '500' to '2xx', '5xx' or '4xx'. #
+
 
 ## 1.11.0-rc.0 in progress
 
