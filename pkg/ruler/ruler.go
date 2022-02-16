@@ -116,6 +116,8 @@ type Config struct {
 	RingCheckPeriod time.Duration `yaml:"-"`
 
 	EnableQueryStats bool `yaml:"query_stats_enabled"`
+
+	QueryFuncFactory QueryFuncFactory `yaml:"-"`
 }
 
 // Validate config and returns error on failure

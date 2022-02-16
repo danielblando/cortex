@@ -49,6 +49,7 @@
 * [ENHANCEMENT] Rulers: Using shuffle sharding subring on GetRules API. #4466
 * [ENHANCEMENT] Support memcached auto-discovery via `auto-discovery` flag, introduced by thanos in https://github.com/thanos-io/thanos/pull/4487. Both AWS and Google Cloud memcached service support auto-discovery, which returns a list of nodes of the memcached cluster. #4412
 * [ENHANCEMENT] Query federation: improve performance in MergeQueryable by memoizing labels. #4502
+* [ENHANCEMENT] Ruler: add possibility to implement `QueryFuncFactory` to rulerManager #
 * [BUGFIX] Fixes a panic in the query-tee when comparing result. #4465
 * [BUGFIX] Frontend: Fixes @ modifier functions (start/end) when splitting queries by time. #4464
 * [BUGFIX] Compactor: compactor will no longer try to compact blocks that are already marked for deletion. Previously compactor would consider blocks marked for deletion within `-compactor.deletion-delay / 2` period as eligible for compaction. #4328
