@@ -170,10 +170,10 @@ func TestTokensPersistencyDelegate_ShouldHandleTheCaseTheInstanceIsAlreadyInTheR
 			defer services.StopAndAwaitTerminated(ctx, lifecycler) //nolint:errcheck
 
 			// Add the instance to the ring.
-			require.NoError(t, store.CAS(ctx, testRingKey, func(in interface{}) (out interface{}, retry bool, err error) {
+			require.NoError(t, store.CAS(ctx, testRingKey+"/"+cfg.ID, func(in interface{}) (out interface{}, retry bool, err error) {
 				ringDesc := NewDesc()
-				ringDesc.AddIngester(cfg.ID, cfg.Addr, cfg.Zone, testData.initialTokens, testData.initialState, registeredAt)
-				return ringDesc, true, nil
+				newIng := ringDesc.AddIngester(cfg.ID, cfg.Addr, cfg.Zone, testData.initialTokens, testData.initialState, registeredAt)
+				return &newIng, true, nil
 			}))
 
 			require.NoError(t, services.StartAndAwaitRunning(ctx, lifecycler))
@@ -236,28 +236,31 @@ func TestAutoForgetDelegate(t *testing.T) {
 	registeredAt := time.Now()
 
 	tests := map[string]struct {
-		setup             func(ringDesc *Desc)
+		setup             func(ringDesc *Desc) (string, *InstanceDesc)
 		expectedInstances []string
 	}{
 		"no unhealthy instance in the ring": {
-			setup: func(ringDesc *Desc) {
-				ringDesc.AddIngester("instance-1", "1.1.1.1", "", nil, ACTIVE, registeredAt)
+			setup: func(ringDesc *Desc) (string, *InstanceDesc) {
+				i := ringDesc.AddIngester("instance-1", "1.1.1.1", "", nil, ACTIVE, registeredAt)
+				return "instance-1", &i
 			},
 			expectedInstances: []string{testInstanceID, "instance-1"},
 		},
 		"unhealthy instance in the ring that has NOTreached the forget period yet": {
-			setup: func(ringDesc *Desc) {
+			setup: func(ringDesc *Desc) (string, *InstanceDesc) {
 				i := ringDesc.AddIngester("instance-1", "1.1.1.1", "", nil, ACTIVE, registeredAt)
 				i.Timestamp = time.Now().Add(-forgetPeriod).Add(5 * time.Second).Unix()
 				ringDesc.Ingesters["instance-1"] = i
+				return "instance-1", &i
 			},
 			expectedInstances: []string{testInstanceID, "instance-1"},
 		},
 		"unhealthy instance in the ring that has reached the forget period": {
-			setup: func(ringDesc *Desc) {
+			setup: func(ringDesc *Desc) (string, *InstanceDesc) {
 				i := ringDesc.AddIngester("instance-1", "1.1.1.1", "", nil, ACTIVE, registeredAt)
 				i.Timestamp = time.Now().Add(-forgetPeriod).Add(-5 * time.Second).Unix()
 				ringDesc.Ingesters["instance-1"] = i
+				return "instance-1", &i
 			},
 			expectedInstances: []string{testInstanceID},
 		},
@@ -276,10 +279,10 @@ func TestAutoForgetDelegate(t *testing.T) {
 			require.NoError(t, err)
 
 			// Setup the initial state of the ring.
-			require.NoError(t, store.CAS(ctx, testRingKey, func(in interface{}) (out interface{}, retry bool, err error) {
-				ringDesc := NewDesc()
-				testData.setup(ringDesc)
-				return ringDesc, true, nil
+			ringDesc := NewDesc()
+			id, newIng := testData.setup(ringDesc)
+			require.NoError(t, store.CAS(ctx, testRingKey+"/"+id, func(in interface{}) (out interface{}, retry bool, err error) {
+				return newIng, true, nil
 			}))
 
 			// Start the lifecycler.
@@ -292,13 +295,17 @@ func TestAutoForgetDelegate(t *testing.T) {
 			})
 
 			// Read back the ring status from the store.
-			v, err := store.Get(ctx, testRingKey)
+			ringDesc, err = getRingDesc(t, store)
 			require.NoError(t, err)
-			require.NotNil(t, v)
 
 			var actualInstances []string
-			for id := range GetOrCreateRingDesc(v).GetIngesters() {
-				actualInstances = append(actualInstances, id)
+			for id := range ringDesc.GetIngesters() {
+				ing, err := store.Get(ctx, testRingKey+"/"+id)
+				require.NoError(t, err)
+				require.NotNil(t, ing)
+				if !ing.(*InstanceDesc).IsDeleted {
+					actualInstances = append(actualInstances, id)
+				}
 			}
 
 			assert.ElementsMatch(t, testData.expectedInstances, actualInstances)

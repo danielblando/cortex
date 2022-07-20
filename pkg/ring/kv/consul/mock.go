@@ -230,6 +230,7 @@ func (m *mockKV) Delete(key string, q *consul.WriteOptions) (*consul.WriteMeta, 
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 	delete(m.kvps, key)
+	m.cond.Broadcast()
 	return nil, nil
 }
 

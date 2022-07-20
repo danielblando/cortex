@@ -767,7 +767,7 @@ func (t *Cortex) initMemberlistKV() (services.Service, error) {
 	reg := prometheus.DefaultRegisterer
 	t.Cfg.MemberlistKV.MetricsRegisterer = reg
 	t.Cfg.MemberlistKV.Codecs = []codec.Codec{
-		ring.GetCodec(),
+		ring.GetCodec(), ring.GetSecCodec(),
 	}
 	dnsProviderReg := prometheus.WrapRegistererWithPrefix(
 		"cortex_",

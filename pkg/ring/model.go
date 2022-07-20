@@ -25,8 +25,17 @@ func ProtoDescFactory() proto.Message {
 	return NewDesc()
 }
 
+// ProtoDescFactory makes new Descs
+func ProtoInstanceDescFactory() proto.Message {
+	return NewInstanceDesc()
+}
+
 // GetCodec returns the codec used to encode and decode data being put by ring.
 func GetCodec() codec.Codec {
+	return codec.NewProtoCodec("instanceDesc", ProtoInstanceDescFactory)
+}
+
+func GetSecCodec() codec.Codec {
 	return codec.NewProtoCodec("ringDesc", ProtoDescFactory)
 }
 
@@ -35,6 +44,10 @@ func NewDesc() *Desc {
 	return &Desc{
 		Ingesters: map[string]InstanceDesc{},
 	}
+}
+
+func NewInstanceDesc() *InstanceDesc {
+	return &InstanceDesc{}
 }
 
 // AddIngester adds the given ingester to the ring. Ingester will only use supplied tokens,
@@ -56,6 +69,7 @@ func (d *Desc) AddIngester(id, addr, zone string, tokens []uint32, state Instanc
 		State:               state,
 		Tokens:              tokens,
 		Zone:                zone,
+		IsDeleted:           false,
 	}
 
 	d.Ingesters[id] = ingester
@@ -281,6 +295,39 @@ func (d *Desc) MergeContent() []string {
 	return result
 }
 
+func (d *InstanceDesc) Merge(mergeable memberlist.Mergeable, localCAS bool) (memberlist.Mergeable, error) {
+	other, ok := mergeable.(*InstanceDesc)
+	if !ok {
+		// This method only deals with non-nil rings.
+		return nil, fmt.Errorf("expected *ring.Desc, got %T", mergeable)
+	}
+
+	ting := d
+	oing := other
+
+	if oing.Timestamp > ting.Timestamp {
+		oing.Tokens = append([]uint32(nil), oing.Tokens...) // make a copy of tokens
+		ting = oing
+	} else if oing.Timestamp == ting.Timestamp && ting.State != LEFT && oing.State == LEFT {
+		// we accept LEFT even if timestamp hasn't changed
+		ting.State = oing.State
+		ting.Tokens = oing.Tokens
+	} else {
+		return nil, nil
+	}
+
+	d.Timestamp = ting.Timestamp
+	d.Tokens = ting.Tokens
+	d.State = ting.State
+	return ting, nil
+}
+
+// MergeContent describes content of this Mergeable.
+// Ring simply returns list of ingesters that it includes.
+func (d *InstanceDesc) MergeContent() []string {
+	return []string{d.Addr}
+}
+
 // normalizeIngestersMap will do the following:
 // - sorts tokens and removes duplicates (only within single ingester)
 // - modifies the input ring
@@ -438,9 +485,22 @@ func (d *Desc) RemoveTombstones(limit time.Time) (total, removed int) {
 	return
 }
 
+// RemoveTombstones removes LEFT ingesters older than given time limit. If time limit is zero, remove all LEFT ingesters.
+func (d *InstanceDesc) RemoveTombstones(limit time.Time) (total, removed int) {
+	if d.State == LEFT {
+		d.IsDeleted = true
+	}
+	return
+}
+
 // Clone returns a deep copy of the ring state.
 func (d *Desc) Clone() memberlist.Mergeable {
 	return proto.Clone(d).(*Desc)
+}
+
+// Clone returns a deep copy of the ring state.
+func (d *InstanceDesc) Clone() memberlist.Mergeable {
+	return proto.Clone(d).(*InstanceDesc)
 }
 
 func (d *Desc) getTokensInfo() map[uint32]instanceInfo {
@@ -565,6 +625,45 @@ func (d *Desc) RingCompare(o *Desc) CompareResult {
 		return Equal
 	}
 	return EqualButStatesAndTimestamps
+}
+
+func (d *Desc) InstanceCompare(id string, ing *InstanceDesc) CompareResult {
+	oing, ok := d.Ingesters[id]
+	if !ok {
+		return Different
+	}
+
+	if ing.Addr != oing.Addr {
+		return Different
+	}
+
+	if ing.Zone != oing.Zone {
+		return Different
+	}
+
+	if ing.IsDeleted != oing.IsDeleted {
+		return Different
+	}
+
+	if ing.RegisteredTimestamp != oing.RegisteredTimestamp {
+		return Different
+	}
+
+	if len(ing.Tokens) != len(oing.Tokens) {
+		return Different
+	}
+
+	for ix, t := range ing.Tokens {
+		if oing.Tokens[ix] != t {
+			return Different
+		}
+	}
+
+	if ing.Timestamp != oing.Timestamp || ing.State != oing.State {
+		return EqualButStatesAndTimestamps
+	}
+
+	return Equal
 }
 
 func GetOrCreateRingDesc(d interface{}) *Desc {

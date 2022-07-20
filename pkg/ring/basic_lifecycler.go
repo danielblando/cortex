@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -246,21 +247,28 @@ heartbeatLoop:
 // registerInstance registers the instance in the ring. The initial state and set of tokens
 // depends on the OnRingInstanceRegister() delegate function.
 func (l *BasicLifecycler) registerInstance(ctx context.Context) error {
-	var instanceDesc InstanceDesc
+	var instanceDesc *InstanceDesc
 
-	err := l.store.CAS(ctx, l.ringKey, func(in interface{}) (out interface{}, retry bool, err error) {
-		ringDesc := GetOrCreateRingDesc(in)
+	ringDesc, err := l.getRingDesc(ctx)
+	if err != nil {
+		return err
+	}
+	if ringDesc == nil {
+		ringDesc = NewDesc()
+	}
 
-		var exists bool
-		instanceDesc, exists = ringDesc.Ingesters[l.cfg.ID]
+	err = l.store.CAS(ctx, l.generateRingKey(), func(in interface{}) (out interface{}, retry bool, err error) {
+		exists := in != nil
 		if exists {
+			instanceDesc = in.(*InstanceDesc)
 			level.Info(l.logger).Log("msg", "instance found in the ring", "instance", l.cfg.ID, "ring", l.ringName, "state", instanceDesc.GetState(), "tokens", len(instanceDesc.GetTokens()), "registered_at", instanceDesc.GetRegisteredAt().String())
 		} else {
+			instanceDesc = NewInstanceDesc()
 			level.Info(l.logger).Log("msg", "instance not found in the ring", "instance", l.cfg.ID, "ring", l.ringName)
 		}
 
 		// We call the delegate to get the desired state right after the initialization.
-		state, tokens := l.delegate.OnRingInstanceRegister(l, *ringDesc, exists, l.cfg.ID, instanceDesc)
+		state, tokens := l.delegate.OnRingInstanceRegister(l, *ringDesc, exists, l.cfg.ID, *instanceDesc)
 
 		// Ensure tokens are sorted.
 		sort.Sort(tokens)
@@ -276,15 +284,15 @@ func (l *BasicLifecycler) registerInstance(ctx context.Context) error {
 		}
 
 		if !exists {
-			instanceDesc = ringDesc.AddIngester(l.cfg.ID, l.cfg.Addr, l.cfg.Zone, tokens, state, registeredAt)
-			return ringDesc, true, nil
+			*instanceDesc = ringDesc.AddIngester(l.cfg.ID, l.cfg.Addr, l.cfg.Zone, tokens, state, registeredAt)
+			return instanceDesc, true, nil
 		}
 
 		// Always overwrite the instance in the ring (even if already exists) because some properties
 		// may have changed (stated, tokens, zone, address) and even if they didn't the heartbeat at
 		// least did.
-		instanceDesc = ringDesc.AddIngester(l.cfg.ID, l.cfg.Addr, l.cfg.Zone, tokens, state, registeredAt)
-		return ringDesc, true, nil
+		*instanceDesc = ringDesc.AddIngester(l.cfg.ID, l.cfg.Addr, l.cfg.Zone, tokens, state, registeredAt)
+		return instanceDesc, true, nil
 	})
 
 	if err != nil {
@@ -292,7 +300,7 @@ func (l *BasicLifecycler) registerInstance(ctx context.Context) error {
 	}
 
 	l.currState.Lock()
-	l.currInstanceDesc = &instanceDesc
+	l.currInstanceDesc = instanceDesc
 	l.currState.Unlock()
 
 	return nil
@@ -369,14 +377,14 @@ func (l *BasicLifecycler) verifyTokens(ctx context.Context) bool {
 func (l *BasicLifecycler) unregisterInstance(ctx context.Context) error {
 	level.Info(l.logger).Log("msg", "unregistering instance from ring", "ring", l.ringName)
 
-	err := l.store.CAS(ctx, l.ringKey, func(in interface{}) (out interface{}, retry bool, err error) {
+	err := l.store.CAS(ctx, l.generateRingKey(), func(in interface{}) (out interface{}, retry bool, err error) {
 		if in == nil {
 			return nil, false, fmt.Errorf("found empty ring when trying to unregister")
 		}
 
-		ringDesc := in.(*Desc)
-		ringDesc.RemoveIngester(l.cfg.ID)
-		return ringDesc, true, nil
+		desc := in.(*InstanceDesc)
+		desc.IsDeleted = true
+		return desc, true, nil
 	})
 
 	if err != nil {
@@ -393,25 +401,46 @@ func (l *BasicLifecycler) unregisterInstance(ctx context.Context) error {
 }
 
 func (l *BasicLifecycler) updateInstance(ctx context.Context, update func(*Desc, *InstanceDesc) bool) error {
-	var instanceDesc InstanceDesc
+	var instanceDesc *InstanceDesc
+	ringDesc, err := l.getRingDesc(ctx)
+	if err != nil {
+		return err
+	}
+	if ringDesc == nil {
+		ringDesc = NewDesc()
+	}
 
-	err := l.store.CAS(ctx, l.ringKey, func(in interface{}) (out interface{}, retry bool, err error) {
-		ringDesc := GetOrCreateRingDesc(in)
-
-		var ok bool
-		instanceDesc, ok = ringDesc.Ingesters[l.cfg.ID]
+	err = l.store.CAS(ctx, l.generateRingKey(), func(in interface{}) (out interface{}, retry bool, err error) {
 
 		// This could happen if the backend store restarted (and content deleted)
 		// or the instance has been forgotten. In this case, we do re-insert it.
-		if !ok {
+		if in == nil {
 			level.Warn(l.logger).Log("msg", "instance missing in the ring, adding it back", "ring", l.ringName)
-			instanceDesc = ringDesc.AddIngester(l.cfg.ID, l.cfg.Addr, l.cfg.Zone, l.GetTokens(), l.GetState(), l.GetRegisteredAt())
+			*instanceDesc = ringDesc.AddIngester(l.cfg.ID, l.cfg.Addr, l.cfg.Zone, l.GetTokens(), l.GetState(), l.GetRegisteredAt())
+		} else {
+			instanceDesc = in.(*InstanceDesc)
 		}
 
 		prevTimestamp := instanceDesc.Timestamp
-		changed := update(ringDesc, &instanceDesc)
-		if ok && !changed {
+		oldIds := ringDesc.MergeContent()
+		changed := update(ringDesc, instanceDesc)
+		if in != nil && !changed {
 			return nil, false, nil
+		}
+
+		for _, id := range oldIds {
+			_, ok := ringDesc.Ingesters[id]
+			if !ok {
+				l.store.CAS(ctx, l.generateRingKeyFor(id), func(in interface{}) (out interface{}, retry bool, err error) {
+					if in == nil {
+						return nil, false, fmt.Errorf("found empty ring when trying to unregister")
+					}
+
+					desc := in.(*InstanceDesc)
+					desc.IsDeleted = true
+					return desc, true, nil
+				})
+			}
 		}
 
 		// Memberlist requires that the timestamp always change, so we do update it unless
@@ -420,8 +449,8 @@ func (l *BasicLifecycler) updateInstance(ctx context.Context, update func(*Desc,
 			instanceDesc.Timestamp = time.Now().Unix()
 		}
 
-		ringDesc.Ingesters[l.cfg.ID] = instanceDesc
-		return ringDesc, true, nil
+		ringDesc.Ingesters[l.cfg.ID] = *instanceDesc
+		return instanceDesc, true, nil
 	})
 
 	if err != nil {
@@ -429,7 +458,7 @@ func (l *BasicLifecycler) updateInstance(ctx context.Context, update func(*Desc,
 	}
 
 	l.currState.Lock()
-	l.currInstanceDesc = &instanceDesc
+	l.currInstanceDesc = instanceDesc
 	l.currState.Unlock()
 
 	return nil
@@ -490,4 +519,42 @@ func (l *BasicLifecycler) run(fn func() error) error {
 	case l.actorChan <- wrappedFn:
 		return <-errCh
 	}
+}
+
+//TODO ddeluigg: same code in ring
+func (r *BasicLifecycler) getRingDesc(ctx context.Context) (*Desc, error) {
+	keys, err := r.store.List(ctx, r.ringKey)
+	if err != nil {
+		return nil, err
+	} else if len(keys) == 0 {
+		return nil, nil
+	}
+
+	instances := make(map[string]InstanceDesc, len(keys))
+	for _, key := range keys {
+		value, err := r.store.Get(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+
+		desc, ok := value.(*InstanceDesc)
+		if ok {
+			if !desc.IsDeleted {
+				chunks := strings.SplitN(key, "/", 2)
+				instances[chunks[1]] = *value.(*InstanceDesc)
+			}
+		}
+	}
+
+	return &Desc{
+		Ingesters: instances,
+	}, nil
+}
+
+func (l *BasicLifecycler) generateRingKey() string {
+	return l.ringKey + "/" + l.GetInstanceID()
+}
+
+func (l *BasicLifecycler) generateRingKeyFor(id string) string {
+	return l.ringKey + "/" + id
 }

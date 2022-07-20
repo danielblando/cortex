@@ -39,6 +39,8 @@ message InstanceDesc {
 	// was already registered before "now". If unknown (0), it should be left as is, and the
 	// code will properly deal with that.
 	int64 registered_timestamp = 8;
+
+	bool isDeleted = 9;
 }
 
 enum InstanceState {

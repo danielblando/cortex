@@ -2,6 +2,7 @@ package ring
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,12 +90,12 @@ func TestBasicLifecycler_RegisterOnStart(t *testing.T) {
 
 			// Add an initial instance to the ring.
 			if testData.initialInstanceDesc != nil {
-				require.NoError(t, store.CAS(ctx, testRingKey, func(in interface{}) (out interface{}, retry bool, err error) {
+				ringDesc, err := getRingDesc(t, store)
+				require.NoError(t, err)
+				require.NoError(t, store.CAS(ctx, testRingKey+"/"+testData.initialInstanceID, func(in interface{}) (out interface{}, retry bool, err error) {
 					desc := testData.initialInstanceDesc
-
-					ringDesc := GetOrCreateRingDesc(in)
-					ringDesc.AddIngester(testData.initialInstanceID, desc.Addr, desc.Zone, desc.Tokens, desc.State, desc.GetRegisteredAt())
-					return ringDesc, true, nil
+					newIng := ringDesc.AddIngester(testData.initialInstanceID, desc.Addr, desc.Zone, desc.Tokens, desc.State, desc.GetRegisteredAt())
+					return &newIng, true, nil
 				}))
 			}
 
@@ -186,8 +187,8 @@ func TestBasicLifecycler_UnregisterOnStop(t *testing.T) {
 	assert.Equal(t, float64(0), testutil.ToFloat64(lifecycler.metrics.tokensToOwn))
 
 	// Assert on the instance removed from the ring.
-	_, ok := getInstanceFromStore(t, store, testInstanceID)
-	assert.False(t, ok)
+	desc, _ := getInstanceFromStore(t, store, testInstanceID)
+	assert.True(t, desc.IsDeleted)
 }
 
 func TestBasicLifecycler_KeepInTheRingOnStop(t *testing.T) {
@@ -269,12 +270,13 @@ func TestBasicLifecycler_HeartbeatWhileStopping(t *testing.T) {
 		// Since the hearbeat timestamp is in seconds we would have to wait 1s before we can assert
 		// on it being changed, regardless the heartbeat period. To speed up this test, we're going
 		// to reset the timestamp to 0 and then assert it has been updated.
-		require.NoError(t, store.CAS(ctx, testRingKey, func(in interface{}) (out interface{}, retry bool, err error) {
-			ringDesc := GetOrCreateRingDesc(in)
-			instanceDesc := ringDesc.Ingesters[testInstanceID]
+		ringDesc, err := getRingDesc(t, store)
+		require.NoError(t, err)
+		require.NoError(t, store.CAS(ctx, testRingKey+"/"+testInstanceID, func(in interface{}) (out interface{}, retry bool, err error) {
+			instanceDesc := in.(*InstanceDesc)
 			instanceDesc.Timestamp = 0
-			ringDesc.Ingesters[testInstanceID] = instanceDesc
-			return ringDesc, true, nil
+			ringDesc.Ingesters[testInstanceID] = *instanceDesc
+			return instanceDesc, true, nil
 		}))
 
 		// Wait until the timestamp has been updated.
@@ -310,11 +312,15 @@ func TestBasicLifecycler_HeartbeatAfterBackendRest(t *testing.T) {
 
 	// At this point the instance has been registered to the ring.
 	expectedRegisteredAt := lifecycler.GetRegisteredAt()
+	ringDesc, _ := getRingDesc(t, store)
+	require.NotNil(t, ringDesc)
 
 	// Now we delete it from the ring to simulate a ring storage reset and we expect the next heartbeat
 	// will restore it.
-	require.NoError(t, store.CAS(ctx, testRingKey, func(in interface{}) (out interface{}, retry bool, err error) {
-		return NewDesc(), true, nil
+	require.NoError(t, store.CAS(ctx, testRingKey+"/"+testInstanceID, func(in interface{}) (out interface{}, retry bool, err error) {
+		desc := in.(*InstanceDesc)
+		desc.IsDeleted = true
+		return desc, true, nil
 	}))
 
 	test.Poll(t, time.Second, true, func() interface{} {
@@ -379,10 +385,11 @@ func TestBasicLifecycler_TokensObservePeriod(t *testing.T) {
 		}
 
 		// Remove some tokens.
-		return store.CAS(ctx, testRingKey, func(in interface{}) (out interface{}, retry bool, err error) {
-			ringDesc := GetOrCreateRingDesc(in)
-			ringDesc.AddIngester(testInstanceID, desc.Addr, desc.Zone, Tokens{4, 5}, desc.State, time.Now())
-			return ringDesc, true, nil
+		ringDesc, err := getRingDesc(t, store)
+		require.NoError(t, err)
+		return store.CAS(ctx, testRingKey+"/"+testInstanceID, func(in interface{}) (out interface{}, retry bool, err error) {
+			newIng := ringDesc.AddIngester(testInstanceID, desc.Addr, desc.Zone, Tokens{4, 5}, desc.State, time.Now())
+			return &newIng, true, nil
 		}) == nil
 	})
 
@@ -413,8 +420,10 @@ func TestBasicLifecycler_updateInstance_ShouldAddInstanceToTheRingIfDoesNotExist
 	expectedRegisteredAt := lifecycler.GetRegisteredAt()
 
 	// Now we delete it from the ring to simulate a ring storage reset.
-	require.NoError(t, store.CAS(ctx, testRingKey, func(in interface{}) (out interface{}, retry bool, err error) {
-		return NewDesc(), true, nil
+	require.NoError(t, store.CAS(ctx, testRingKey+"/"+testInstanceID, func(in interface{}) (out interface{}, retry bool, err error) {
+		desc := in.(*InstanceDesc)
+		desc.IsDeleted = true
+		return desc, true, nil
 	}))
 
 	// Run a noop update instance, but since the instance is not in the ring we do expect
@@ -492,16 +501,38 @@ func (m *mockDelegate) OnRingInstanceHeartbeat(lifecycler *BasicLifecycler, ring
 	}
 }
 
+//TODO ddeluigg: same code in ring
+func getRingDesc(t *testing.T, store kv.Client) (*Desc, error) {
+	keys, err := store.List(context.Background(), testRingKey)
+	require.NoError(t, err)
+
+	if len(keys) == 0 {
+		return NewDesc(), nil
+	}
+
+	instances := make(map[string]InstanceDesc, len(keys))
+	for _, key := range keys {
+		value, err := store.Get(context.Background(), key)
+		require.NoError(t, err)
+
+		if !value.(*InstanceDesc).IsDeleted {
+			chunks := strings.SplitN(key, "/", 2)
+			instances[chunks[1]] = *value.(*InstanceDesc)
+		}
+	}
+
+	return &Desc{
+		Ingesters: instances,
+	}, nil
+}
+
 func getInstanceFromStore(t *testing.T, store kv.Client, instanceID string) (InstanceDesc, bool) {
-	out, err := store.Get(context.Background(), testRingKey)
+	out, err := store.Get(context.Background(), testRingKey+"/"+instanceID)
 	require.NoError(t, err)
 
 	if out == nil {
 		return InstanceDesc{}, false
 	}
 
-	ringDesc := out.(*Desc)
-	instanceDesc, ok := ringDesc.GetIngesters()[instanceID]
-
-	return instanceDesc, ok
+	return *out.(*InstanceDesc), true
 }

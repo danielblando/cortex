@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -222,7 +223,7 @@ func NewWithStoreClientAndStrategy(cfg Config, name, key string, store kv.Client
 		cfg:                  cfg,
 		KVClient:             store,
 		strategy:             strategy,
-		ringDesc:             &Desc{},
+		ringDesc:             NewDesc(),
 		shuffledSubringCache: map[subringCacheKey]*Ring{},
 		memberOwnershipGaugeVec: promauto.With(reg).NewGaugeVec(prometheus.GaugeOpts{
 			Name:        "ring_member_ownership_percent",
@@ -259,16 +260,45 @@ func (r *Ring) starting(ctx context.Context) error {
 	// Get the initial ring state so that, as soon as the service will be running, the in-memory
 	// ring would be already populated and there's no race condition between when the service is
 	// running and the WatchKey() callback is called for the first time.
-	value, err := r.KVClient.Get(ctx, r.key)
+	value, err := r.getRingDesc(ctx)
 	if err != nil {
 		return errors.Wrap(err, "unable to initialise ring state")
 	}
 	if value != nil {
-		r.updateRingState(value.(*Desc))
+		r.updateRingState(value)
 	} else {
 		level.Info(r.logger).Log("msg", "ring doesn't exist in KV store yet")
 	}
 	return nil
+}
+
+func (r *Ring) getRingDesc(ctx context.Context) (*Desc, error) {
+	keys, err := r.KVClient.List(ctx, r.key)
+	if err != nil {
+		return nil, err
+	} else if len(keys) == 0 {
+		return nil, nil
+	}
+
+	instances := make(map[string]InstanceDesc, len(keys))
+	for _, key := range keys {
+		value, err := r.KVClient.Get(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+
+		desc, ok := value.(*InstanceDesc)
+		if ok {
+			if !desc.IsDeleted {
+				chunks := strings.SplitN(key, "/", 2)
+				instances[chunks[1]] = *value.(*InstanceDesc)
+			}
+		}
+	}
+
+	return &Desc{
+		Ingesters: instances,
+	}, nil
 }
 
 func (r *Ring) loop(ctx context.Context) error {
@@ -277,16 +307,69 @@ func (r *Ring) loop(ctx context.Context) error {
 	r.updateRingMetrics(Different)
 	r.mtx.Unlock()
 
-	r.KVClient.WatchKey(ctx, r.key, func(value interface{}) bool {
+	r.KVClient.WatchPrefix(ctx, r.key, func(key string, value interface{}) bool {
 		if value == nil {
 			level.Info(r.logger).Log("msg", "ring doesn't exist in KV store yet")
 			return true
 		}
-
-		r.updateRingState(value.(*Desc))
+		desc, ok := value.(*InstanceDesc)
+		if ok {
+			if desc.IsDeleted {
+				r.removeInstance(strings.SplitN(key, "/", 2)[1])
+			} else {
+				r.updateInstance(strings.SplitN(key, "/", 2)[1], desc)
+			}
+		}
 		return true
 	})
 	return nil
+}
+
+func (r *Ring) updateInstance(instanceId string, instance *InstanceDesc) {
+	r.mtx.RLock()
+	prevRing := r.ringDesc
+	r.mtx.RUnlock()
+
+	// Filter out all instances belonging to excluded zones.
+	if len(r.cfg.ExcludedZones) > 0 {
+		if util.StringsContain(r.cfg.ExcludedZones, instance.Zone) {
+			return
+		}
+	}
+
+	rc := prevRing.InstanceCompare(instanceId, instance)
+	if rc == Equal || rc == EqualButStatesAndTimestamps {
+		// No need to update tokens or zones. Only states and timestamps
+		// have changed. (If Equal, nothing has changed, but that doesn't happen
+		// when watching the ring for updates).
+		r.mtx.Lock()
+		r.ringDesc.Ingesters[instanceId] = *instance
+		r.updateRingMetrics(rc)
+		r.mtx.Unlock()
+		return
+	}
+
+	//TODO ddeluigg: optimize all variables to use the new instance value instead of calculating whole ring
+	now := time.Now()
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	r.ringDesc.Ingesters[instanceId] = *instance
+	r.ringTokens = r.ringDesc.GetTokens()
+	r.ringTokensByZone = r.ringDesc.getTokensByZone()
+	r.ringInstanceByToken = r.ringDesc.getTokensInfo()
+	r.ringZones = getZones(r.ringTokensByZone)
+	r.lastTopologyChange = now
+	if r.shuffledSubringCache != nil {
+		// Invalidate all cached subrings.
+		r.shuffledSubringCache = make(map[subringCacheKey]*Ring)
+	}
+	r.updateRingMetrics(rc)
+}
+
+func (r *Ring) removeInstance(instanceId string) {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
+	r.ringDesc.RemoveIngester(instanceId)
 }
 
 func (r *Ring) updateRingState(ringDesc *Desc) {
