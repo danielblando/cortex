@@ -2,7 +2,6 @@ package ring
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -377,15 +376,7 @@ func (l *BasicLifecycler) verifyTokens(ctx context.Context) bool {
 func (l *BasicLifecycler) unregisterInstance(ctx context.Context) error {
 	level.Info(l.logger).Log("msg", "unregistering instance from ring", "ring", l.ringName)
 
-	err := l.store.CAS(ctx, l.generateRingKey(), func(in interface{}) (out interface{}, retry bool, err error) {
-		if in == nil {
-			return nil, false, fmt.Errorf("found empty ring when trying to unregister")
-		}
-
-		desc := in.(*InstanceDesc)
-		desc.IsDeleted = true
-		return desc, true, nil
-	})
+	err := l.store.Delete(ctx, l.generateRingKey())
 
 	if err != nil {
 		return err
@@ -431,15 +422,7 @@ func (l *BasicLifecycler) updateInstance(ctx context.Context, update func(*Desc,
 		for _, id := range oldIds {
 			_, ok := ringDesc.Ingesters[id]
 			if !ok {
-				l.store.CAS(ctx, l.generateRingKeyFor(id), func(in interface{}) (out interface{}, retry bool, err error) {
-					if in == nil {
-						return nil, false, fmt.Errorf("found empty ring when trying to unregister")
-					}
-
-					desc := in.(*InstanceDesc)
-					desc.IsDeleted = true
-					return desc, true, nil
-				})
+				l.store.Delete(ctx, l.generateRingKeyFor(id))
 			}
 		}
 
@@ -539,10 +522,8 @@ func (r *BasicLifecycler) getRingDesc(ctx context.Context) (*Desc, error) {
 
 		desc, ok := value.(*InstanceDesc)
 		if ok {
-			if !desc.IsDeleted {
-				chunks := strings.SplitN(key, "/", 2)
-				instances[chunks[1]] = *value.(*InstanceDesc)
-			}
+			chunks := strings.SplitN(key, "/", 2)
+			instances[chunks[1]] = *desc
 		}
 	}
 

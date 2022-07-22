@@ -271,10 +271,8 @@ func (r *Lifecycler) getRingDesc(ctx context.Context) (*Desc, error) {
 
 		desc, ok := value.(*InstanceDesc)
 		if ok {
-			if !desc.IsDeleted {
-				chunks := strings.SplitN(key, "/", 2)
-				instances[chunks[1]] = *value.(*InstanceDesc)
-			}
+			chunks := strings.SplitN(key, "/", 2)
+			instances[chunks[1]] = *desc
 		}
 	}
 
@@ -885,11 +883,7 @@ func (i *Lifecycler) processShutdown(ctx context.Context) {
 func (i *Lifecycler) unregister(ctx context.Context) error {
 	level.Debug(i.logger).Log("msg", "unregistering instance from ring", "ring", i.RingName)
 
-	return i.KVStore.CAS(ctx, i.generateRingKey(), func(in interface{}) (out interface{}, retry bool, err error) {
-		desc := in.(*InstanceDesc)
-		desc.IsDeleted = true
-		return desc, true, err
-	})
+	return i.KVStore.Delete(ctx, i.generateRingKey())
 }
 
 func (i *Lifecycler) generateRingKey() string {

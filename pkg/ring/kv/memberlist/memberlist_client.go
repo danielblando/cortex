@@ -71,7 +71,14 @@ func (c *Client) Get(ctx context.Context, key string) (interface{}, error) {
 
 // Delete is part of kv.Client interface.
 func (c *Client) Delete(ctx context.Context, key string) error {
-	return errors.New("memberlist does not support Delete")
+	err := c.awaitKVRunningOrStopping(ctx)
+	if err != nil {
+		return err
+	}
+
+	c.kv.Delete(key, c.codec)
+
+	return nil
 }
 
 // CAS is part of kv.Client interface
@@ -640,6 +647,21 @@ func (m *KV) Get(key string, codec codec.Codec) (interface{}, error) {
 	return val, err
 }
 
+func (m *KV) Delete(key string, codec codec.Codec) {
+	val, ver, _ := m.get(key, codec)
+
+	delete(m.store, key)
+	m.notifyWatchers(key)
+
+	r, ok := val.(Mergeable)
+	if !ok || r == nil {
+		return
+	}
+	r.MarkForDelete()
+
+	m.broadcastNewValue(key, r, ver, codec)
+}
+
 // Returns current value with removed tombstones.
 func (m *KV) get(key string, codec codec.Codec) (out interface{}, version uint, err error) {
 	m.storeMu.Lock()
@@ -728,7 +750,9 @@ func (m *KV) WatchPrefix(ctx context.Context, prefix string, codec codec.Codec, 
 		case key := <-w:
 			val, _, err := m.get(key, codec)
 			if err != nil {
-				level.Warn(m.logger).Log("msg", "failed to decode value while watching for changes", "key", key, "err", err)
+				if !f(key, nil) {
+					return
+				}
 				continue
 			}
 
@@ -1176,6 +1200,10 @@ func (m *KV) mergeBytesValueForKey(key string, incomingData []byte, codec codec.
 	incomingValue, ok := decodedValue.(Mergeable)
 	if !ok {
 		return nil, 0, fmt.Errorf("expected Mergeable, got: %T", decodedValue)
+	}
+
+	if incomingValue.IsDeleting() {
+		m.Delete(key, codec)
 	}
 
 	return m.mergeValueForKey(key, incomingValue, 0, codec)

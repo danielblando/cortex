@@ -631,11 +631,7 @@ func TestTokensOnDisk(t *testing.T) {
 	// Check this ingester joined, is active, and has 512 token.
 	var actTokens []uint32
 	test.Poll(t, 1000*time.Millisecond, true, func() interface{} {
-		d, err := r.KVClient.Get(context.Background(), ringKey+"/ing1")
-		require.NoError(t, err)
-		require.True(t, d.(*InstanceDesc).IsDeleted)
-
-		d, err = r.KVClient.Get(context.Background(), ringKey+"/ing2")
+		d, err := r.KVClient.Get(context.Background(), ringKey+"/ing2")
 		require.NoError(t, err)
 		desc, ok := d.(*InstanceDesc)
 		if ok {

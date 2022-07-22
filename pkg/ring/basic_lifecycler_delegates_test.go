@@ -303,9 +303,7 @@ func TestAutoForgetDelegate(t *testing.T) {
 				ing, err := store.Get(ctx, testRingKey+"/"+id)
 				require.NoError(t, err)
 				require.NotNil(t, ing)
-				if !ing.(*InstanceDesc).IsDeleted {
-					actualInstances = append(actualInstances, id)
-				}
+				actualInstances = append(actualInstances, id)
 			}
 
 			assert.ElementsMatch(t, testData.expectedInstances, actualInstances)

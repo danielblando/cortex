@@ -289,10 +289,8 @@ func (r *Ring) getRingDesc(ctx context.Context) (*Desc, error) {
 
 		desc, ok := value.(*InstanceDesc)
 		if ok {
-			if !desc.IsDeleted {
-				chunks := strings.SplitN(key, "/", 2)
-				instances[chunks[1]] = *value.(*InstanceDesc)
-			}
+			chunks := strings.SplitN(key, "/", 2)
+			instances[chunks[1]] = *desc
 		}
 	}
 
@@ -310,15 +308,12 @@ func (r *Ring) loop(ctx context.Context) error {
 	r.KVClient.WatchPrefix(ctx, r.key, func(key string, value interface{}) bool {
 		if value == nil {
 			level.Info(r.logger).Log("msg", "ring doesn't exist in KV store yet")
+			r.removeInstance(strings.SplitN(key, "/", 2)[1])
 			return true
 		}
 		desc, ok := value.(*InstanceDesc)
 		if ok {
-			if desc.IsDeleted {
-				r.removeInstance(strings.SplitN(key, "/", 2)[1])
-			} else {
-				r.updateInstance(strings.SplitN(key, "/", 2)[1], desc)
-			}
+			r.updateInstance(strings.SplitN(key, "/", 2)[1], desc)
 		}
 		return true
 	})

@@ -3,7 +3,6 @@ package ring
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"html/template"
 	"math"
 	"net/http"
@@ -91,16 +90,11 @@ func init() {
 }
 
 func (r *Ring) forget(ctx context.Context, id string) error {
-	unregister := func(in interface{}) (out interface{}, retry bool, err error) {
-		if in == nil {
-			return nil, false, fmt.Errorf("found empty ring when trying to unregister")
-		}
+	return r.KVClient.Delete(ctx, r.generateRingKeyFor(id))
+}
 
-		ringDesc := in.(*Desc)
-		ringDesc.RemoveIngester(id)
-		return ringDesc, true, nil
-	}
-	return r.KVClient.CAS(ctx, r.key, unregister)
+func (l *Ring) generateRingKeyFor(id string) string {
+	return l.key + "/" + id
 }
 
 type ingesterDesc struct {

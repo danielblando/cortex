@@ -48,4 +48,8 @@ type Mergeable interface {
 
 	// Clone should return a deep copy of the state.
 	Clone() Mergeable
+
+	IsDeleting() bool
+
+	MarkForDelete()
 }

@@ -187,8 +187,8 @@ func TestBasicLifecycler_UnregisterOnStop(t *testing.T) {
 	assert.Equal(t, float64(0), testutil.ToFloat64(lifecycler.metrics.tokensToOwn))
 
 	// Assert on the instance removed from the ring.
-	desc, _ := getInstanceFromStore(t, store, testInstanceID)
-	assert.True(t, desc.IsDeleted)
+	_, ok := getInstanceFromStore(t, store, testInstanceID)
+	assert.False(t, ok)
 }
 
 func TestBasicLifecycler_KeepInTheRingOnStop(t *testing.T) {
@@ -317,11 +317,7 @@ func TestBasicLifecycler_HeartbeatAfterBackendRest(t *testing.T) {
 
 	// Now we delete it from the ring to simulate a ring storage reset and we expect the next heartbeat
 	// will restore it.
-	require.NoError(t, store.CAS(ctx, testRingKey+"/"+testInstanceID, func(in interface{}) (out interface{}, retry bool, err error) {
-		desc := in.(*InstanceDesc)
-		desc.IsDeleted = true
-		return desc, true, nil
-	}))
+	require.NoError(t, store.Delete(ctx, testRingKey+"/"+testInstanceID))
 
 	test.Poll(t, time.Second, true, func() interface{} {
 		desc, ok := getInstanceFromStore(t, store, testInstanceID)
@@ -420,11 +416,7 @@ func TestBasicLifecycler_updateInstance_ShouldAddInstanceToTheRingIfDoesNotExist
 	expectedRegisteredAt := lifecycler.GetRegisteredAt()
 
 	// Now we delete it from the ring to simulate a ring storage reset.
-	require.NoError(t, store.CAS(ctx, testRingKey+"/"+testInstanceID, func(in interface{}) (out interface{}, retry bool, err error) {
-		desc := in.(*InstanceDesc)
-		desc.IsDeleted = true
-		return desc, true, nil
-	}))
+	require.NoError(t, store.Delete(ctx, testRingKey+"/"+testInstanceID))
 
 	// Run a noop update instance, but since the instance is not in the ring we do expect
 	// it will added back anyway.
@@ -515,10 +507,8 @@ func getRingDesc(t *testing.T, store kv.Client) (*Desc, error) {
 		value, err := store.Get(context.Background(), key)
 		require.NoError(t, err)
 
-		if !value.(*InstanceDesc).IsDeleted {
-			chunks := strings.SplitN(key, "/", 2)
-			instances[chunks[1]] = *value.(*InstanceDesc)
-		}
+		chunks := strings.SplitN(key, "/", 2)
+		instances[chunks[1]] = *value.(*InstanceDesc)
 	}
 
 	return &Desc{

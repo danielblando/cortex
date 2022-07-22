@@ -69,7 +69,6 @@ func (d *Desc) AddIngester(id, addr, zone string, tokens []uint32, state Instanc
 		State:               state,
 		Tokens:              tokens,
 		Zone:                zone,
-		IsDeleted:           false,
 	}
 
 	d.Ingesters[id] = ingester
@@ -328,6 +327,22 @@ func (d *InstanceDesc) MergeContent() []string {
 	return []string{d.Addr}
 }
 
+func (d *Desc) IsDeleting() bool {
+	return false
+}
+
+func (d *Desc) MarkForDelete() {
+	return
+}
+
+func (d *InstanceDesc) IsDeleting() bool {
+	return d.Addr == ""
+}
+
+func (d *InstanceDesc) MarkForDelete() {
+	d.Addr = ""
+}
+
 // normalizeIngestersMap will do the following:
 // - sorts tokens and removes duplicates (only within single ingester)
 // - modifies the input ring
@@ -487,9 +502,6 @@ func (d *Desc) RemoveTombstones(limit time.Time) (total, removed int) {
 
 // RemoveTombstones removes LEFT ingesters older than given time limit. If time limit is zero, remove all LEFT ingesters.
 func (d *InstanceDesc) RemoveTombstones(limit time.Time) (total, removed int) {
-	if d.State == LEFT {
-		d.IsDeleted = true
-	}
 	return
 }
 
@@ -638,10 +650,6 @@ func (d *Desc) InstanceCompare(id string, ing *InstanceDesc) CompareResult {
 	}
 
 	if ing.Zone != oing.Zone {
-		return Different
-	}
-
-	if ing.IsDeleted != oing.IsDeleted {
 		return Different
 	}
 
