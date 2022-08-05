@@ -25,6 +25,11 @@ func ProtoDescFactory() proto.Message {
 	return NewDesc()
 }
 
+// ProtoInstanceFactory makes new Descs
+func ProtoInstanceFactory() proto.Message {
+	return NewInstanceDesc()
+}
+
 // GetCodec returns the codec used to encode and decode data being put by ring.
 func GetCodec() codec.Codec {
 	return codec.NewProtoCodec("ringDesc", ProtoDescFactory)
@@ -35,6 +40,11 @@ func NewDesc() *Desc {
 	return &Desc{
 		Ingesters: map[string]InstanceDesc{},
 	}
+}
+
+// NewInstanceDesc returns an empty ring.Desc
+func NewInstanceDesc() *InstanceDesc {
+	return &InstanceDesc{}
 }
 
 // AddIngester adds the given ingester to the ring. Ingester will only use supplied tokens,
@@ -648,4 +658,60 @@ func MergeTokensByZone(zones map[string][][]uint32) map[string][]uint32 {
 		out[zone] = MergeTokens(tokens)
 	}
 	return out
+}
+
+func (d *Desc) SplitById() map[string]interface{} {
+	b := make(map[string]interface{}, len(d.Ingesters))
+	for key, v := range d.Ingesters {
+		b[key] = v
+	}
+	return b
+}
+
+func (d *Desc) JoinIds(in map[string]interface{}) {
+	for key, value := range in {
+		d.Ingesters[key] = value.(InstanceDesc)
+	}
+}
+
+func (d *Desc) GetChildFactory() proto.Message {
+	return &InstanceDesc{}
+}
+
+func (d *Desc) FindDifference(that codec.MultiKey) (map[string]codec.DifferenceResult, error) {
+	o, ok := that.(*Desc)
+	if !ok {
+		// This method only deals with non-nil rings.
+		return nil, fmt.Errorf("expected *ring.Desc, got %T", that)
+	}
+	res := make(map[string]codec.DifferenceResult, 0)
+	if d == nil {
+		if o == nil || len(o.Ingesters) == 0 {
+			return res, nil
+		}
+		for k := range o.Ingesters {
+			res[k] = codec.Updated
+		}
+		return res, nil
+	}
+	if o == nil {
+		if len(d.Ingesters) == 0 {
+			return res, nil
+		}
+		for k := range o.Ingesters {
+			res[k] = codec.Deleted
+		}
+		return res, nil
+	}
+
+	for name, ing := range d.Ingesters {
+		oing, ok := o.Ingesters[name]
+		if !ok {
+			res[name] = codec.Deleted
+		}
+		if ing.Timestamp < oing.Timestamp {
+			res[name] = codec.Updated
+		}
+	}
+	return res, nil
 }
