@@ -728,7 +728,7 @@ func (i *Lifecycler) autoJoin(ctx context.Context, targetState InstanceState) er
 func (i *Lifecycler) updateConsul(ctx context.Context) error {
 	var ringDesc *Desc
 
-	err := i.KVStore.CAS(ctx, i.RingKey, func(in interface{}) (out interface{}, changes interface{}, retry bool, err error) {
+	err := i.KVStore.CAS(ctx, i.RingKey, func(in interface{}) (out interface{}, retry bool, err error) {
 		if in == nil {
 			ringDesc = NewDesc()
 		} else {

@@ -663,55 +663,72 @@ func MergeTokensByZone(zones map[string][][]uint32) map[string][]uint32 {
 func (d *Desc) SplitById() map[string]interface{} {
 	b := make(map[string]interface{}, len(d.Ingesters))
 	for key, v := range d.Ingesters {
-		b[key] = v
+		b[key] = &v
 	}
 	return b
 }
 
 func (d *Desc) JoinIds(in map[string]interface{}) {
 	for key, value := range in {
-		d.Ingesters[key] = value.(InstanceDesc)
+		d.Ingesters[key] = *(value.(*InstanceDesc))
 	}
 }
 
 func (d *Desc) GetChildFactory() proto.Message {
-	return &InstanceDesc{}
+	return NewInstanceDesc()
 }
 
-func (d *Desc) FindDifference(that codec.MultiKey) (map[string]codec.DifferenceResult, error) {
+func (d *Desc) FindDifference(that codec.MultiKey) (interface{}, []string, error) {
 	o, ok := that.(*Desc)
 	if !ok {
 		// This method only deals with non-nil rings.
-		return nil, fmt.Errorf("expected *ring.Desc, got %T", that)
+		return nil, nil, fmt.Errorf("expected *ring.Desc, got %T", that)
 	}
-	res := make(map[string]codec.DifferenceResult, 0)
+	toUpdated := NewDesc()
+	toDelete := make([]string, 0)
 	if d == nil {
 		if o == nil || len(o.Ingesters) == 0 {
-			return res, nil
+			return toUpdated, toDelete, nil
 		}
 		for k := range o.Ingesters {
-			res[k] = codec.Updated
+			toUpdated.Ingesters[k] = o.Ingesters[k]
 		}
-		return res, nil
+		return toUpdated, toDelete, nil
 	}
 	if o == nil {
 		if len(d.Ingesters) == 0 {
-			return res, nil
+			return toUpdated, toDelete, nil
 		}
 		for k := range o.Ingesters {
-			res[k] = codec.Deleted
+			toDelete = append(toDelete, k)
 		}
-		return res, nil
+		return toUpdated, toDelete, nil
+	}
+
+	for name, oing := range o.Ingesters {
+		_, ok := d.Ingesters[name]
+		if !ok {
+			toUpdated.Ingesters[name] = oing
+		}
 	}
 
 	for name, ing := range d.Ingesters {
 		oing, ok := o.Ingesters[name]
 		if !ok {
-			res[name] = codec.Deleted
+			toDelete = append(toDelete, name)
 		}
-		if ing.Timestamp < oing.Timestamp {
-			res[name] = codec.Updated
+		if ing.Timestamp < oing.Timestamp || ing.RegisteredTimestamp < oing.RegisteredTimestamp {
+			toUpdated.Ingesters[name] = oing
+		} else if len(ing.Tokens) != len(oing.Tokens) {
+			toUpdated.Ingesters[name] = oing
+		} else {
+			for ix, t := range ing.Tokens {
+				if oing.Tokens[ix] != t {
+					toUpdated.Ingesters[name] = oing
+					break
+				}
+			}
 		}
 	}
-	return res, nil
+	return toUpdated, toDelete, nil
 }

@@ -18,5 +18,5 @@ type MultiKey interface {
 
 	GetChildFactory() proto.Message
 
-	FindDifference(that MultiKey) (map[string]DifferenceResult, error)
+	FindDifference(that MultiKey) (interface{}, []string, error)
 }

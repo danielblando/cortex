@@ -12,6 +12,7 @@ import (
 	"github.com/cortexproject/cortex/pkg/ring/kv/codec"
 	"github.com/cortexproject/cortex/pkg/ring/kv/consul"
 	"github.com/cortexproject/cortex/pkg/ring/kv/etcd"
+	"github.com/cortexproject/cortex/pkg/ring/kv/etcdMulti"
 	"github.com/cortexproject/cortex/pkg/ring/kv/memberlist"
 )
 
@@ -40,9 +41,10 @@ var inmemoryStore Client
 // Consul, Etcd, Memberlist or MultiClient. It was extracted from Config to keep
 // single-client config separate from final client-config (with all the wrappers)
 type StoreConfig struct {
-	Consul consul.Config `yaml:"consul"`
-	Etcd   etcd.Config   `yaml:"etcd"`
-	Multi  MultiConfig   `yaml:"multi"`
+	Consul   consul.Config `yaml:"consul"`
+	Etcd     etcd.Config   `yaml:"etcd"`
+	EtcdTemp etcd.Config   `yaml:"etcd_temp"`
+	Multi    MultiConfig   `yaml:"multi"`
 
 	// Function that returns memberlist.KV store to use. By using a function, we can delay
 	// initialization of memberlist.KV until it is actually required.
@@ -77,7 +79,7 @@ func (cfg *Config) RegisterFlagsWithPrefix(flagsPrefix, defaultPrefix string, f 
 		flagsPrefix = "ring."
 	}
 	f.StringVar(&cfg.Prefix, flagsPrefix+"prefix", defaultPrefix, "The prefix for the keys in the store. Should end with a /.")
-	f.StringVar(&cfg.Store, flagsPrefix+"store", "consul", "Backend storage to use for the ring. Supported values are: consul, etcd, inmemory, memberlist, multi.")
+	f.StringVar(&cfg.Store, flagsPrefix+"store", "consul", "Backend storage to use for the ring. Supported values are: consul, etcd, etcd_temp, inmemory, memberlist, multi.")
 }
 
 // Client is a high-level client for key-value stores (such as Etcd and
@@ -133,6 +135,12 @@ func createClient(backend string, prefix string, cfg StoreConfig, codec codec.Co
 
 	case "etcd":
 		client, err = etcd.New(cfg.Etcd, codec, logger)
+
+	case "etcdMulti":
+		client, err = etcdMulti.New(etcdMulti.Config(cfg.Etcd), codec, logger)
+
+	case "etcd_temp":
+		client, err = etcd.New(cfg.EtcdTemp, codec, logger)
 
 	case "inmemory":
 		// If we use the in-memory store, make sure everyone gets the same instance
