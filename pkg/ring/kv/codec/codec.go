@@ -17,6 +17,8 @@ type Codec interface {
 	// CodecID is a short identifier to communicate what codec should be used to decode the value.
 	// Once in use, this should be stable to avoid confusing other clients.
 	CodecID() string
+
+	GetFactory() func() proto.Message
 }
 
 // Proto is a Codec for proto/snappy
@@ -31,6 +33,10 @@ func NewProtoCodec(id string, factory func() proto.Message) Proto {
 
 func (p Proto) CodecID() string {
 	return p.id
+}
+
+func (p Proto) GetFactory() func() proto.Message {
+	return p.factory
 }
 
 // Decode implements Codec
