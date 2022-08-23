@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/cortexproject/cortex/pkg/ring/kv/dynamoDbMultiKey"
 	"sync"
 
 	"github.com/go-kit/log"
@@ -138,6 +139,9 @@ func createClient(backend string, prefix string, cfg StoreConfig, codec codec.Co
 
 	case "etcdMulti":
 		client, err = etcdMulti.New(etcdMulti.Config(cfg.Etcd), codec, logger)
+
+	case "ddb":
+		client, err = dynamoDbMultiKey.NewClient(codec, logger)
 
 	case "etcd_temp":
 		client, err = etcd.New(cfg.EtcdTemp, codec, logger)
