@@ -314,7 +314,7 @@ type valueDesc struct {
 func (v valueDesc) Clone() (result valueDesc) {
 	result = v
 	if v.value != nil {
-		result.value = v.value.Clone()
+		result.value = v.value.Clone().(Mergeable)
 	}
 	return
 }
@@ -1253,7 +1253,7 @@ func (m *KV) mergeValueForKey(key string, incomingValue Mergeable, casVersion ui
 
 	// The "changes" returned by Merge() can contain references to the "result"
 	// state. Therefore, make sure we clone it before releasing the lock.
-	change = change.Clone()
+	change = change.Clone().(Mergeable)
 
 	return change, newVersion, nil
 }

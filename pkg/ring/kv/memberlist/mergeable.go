@@ -1,10 +1,15 @@
 package memberlist
 
-import "time"
+import (
+	"github.com/cortexproject/cortex/pkg/ring/kv/codec"
+	"time"
+)
 
 // Mergeable is an interface that values used in gossiping KV Client must implement.
 // It allows merging of different states, obtained via gossiping or CAS function.
 type Mergeable interface {
+	codec.Refresher
+
 	// Merge with other value in place. Returns change, that can be sent to other clients.
 	// If merge doesn't result in any change, returns nil.
 	// Error can be returned if merging with given 'other' value is not possible.
@@ -45,7 +50,4 @@ type Mergeable interface {
 	// time when client is accessing value from the store. It can be used to hide tombstones from the clients.
 	// Returns the total number of tombstones present and the number of removed tombstones by this invocation.
 	RemoveTombstones(limit time.Time) (total, removed int)
-
-	// Clone should return a deep copy of the state.
-	Clone() Mergeable
 }

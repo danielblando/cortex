@@ -144,6 +144,14 @@ func (d dataCodec) Decode(b []byte) (interface{}, error) {
 	return out, err
 }
 
+func (d dataCodec) DecodeMultiKey(map[string][]byte) (interface{}, error) {
+	return nil, errors.New("memberlist does not support DecodeMultiKey")
+}
+
+func (d dataCodec) EncodeMultiKey(interface{}) (map[string][]byte, error) {
+	return nil, errors.New("memberlist does not support EncodeMultiKey")
+}
+
 func (d dataCodec) Encode(val interface{}) ([]byte, error) {
 	buf := bytes.Buffer{}
 	enc := gob.NewEncoder(&buf)
@@ -963,6 +971,14 @@ func (d distributedCounterCodec) Encode(val interface{}) ([]byte, error) {
 	enc := gob.NewEncoder(&buf)
 	err := enc.Encode(val)
 	return buf.Bytes(), err
+}
+
+func (d distributedCounterCodec) DecodeMultiKey(map[string][]byte) (interface{}, error) {
+	return nil, errors.New("memberlist does not support DecodeMultiKey")
+}
+
+func (d distributedCounterCodec) EncodeMultiKey(interface{}) (map[string][]byte, error) {
+	return nil, errors.New("memberlist does not support EncodeMultiKey")
 }
 
 var _ codec.Codec = &distributedCounterCodec{}
