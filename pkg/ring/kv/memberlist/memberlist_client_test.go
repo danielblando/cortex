@@ -111,7 +111,7 @@ func (m member) clone() member {
 	return out
 }
 
-func (d *data) Clone() Mergeable {
+func (d *data) Clone() interface{} {
 	out := &data{
 		Members: make(map[string]member, len(d.Members)),
 	}
@@ -120,6 +120,8 @@ func (d *data) Clone() Mergeable {
 	}
 	return out
 }
+
+func (d *data) RefreshTimestamp(int64) {}
 
 func (d *data) getAllTokens() []uint32 {
 	out := []uint32(nil)
@@ -142,6 +144,14 @@ func (d dataCodec) Decode(b []byte) (interface{}, error) {
 	out := &data{}
 	err := dec.Decode(out)
 	return out, err
+}
+
+func (d dataCodec) DecodeMultiKey(map[string][]byte) (interface{}, error) {
+	return nil, errors.New("memberlist does not support DecodeMultiKey")
+}
+
+func (d dataCodec) EncodeMultiKey(interface{}) (map[string][]byte, error) {
+	return nil, errors.New("memberlist does not support EncodeMultiKey")
 }
 
 func (d dataCodec) Encode(val interface{}) ([]byte, error) {
@@ -937,13 +947,15 @@ func (dc distributedCounter) RemoveTombstones(limit time.Time) (_, _ int) {
 	return
 }
 
-func (dc distributedCounter) Clone() Mergeable {
+func (dc distributedCounter) Clone() interface{} {
 	out := make(distributedCounter, len(dc))
 	for k, v := range dc {
 		out[k] = v
 	}
 	return out
 }
+
+func (distributedCounter) RefreshTimestamp(int64) {}
 
 type distributedCounterCodec struct{}
 
@@ -963,6 +975,14 @@ func (d distributedCounterCodec) Encode(val interface{}) ([]byte, error) {
 	enc := gob.NewEncoder(&buf)
 	err := enc.Encode(val)
 	return buf.Bytes(), err
+}
+
+func (d distributedCounterCodec) DecodeMultiKey(map[string][]byte) (interface{}, error) {
+	return nil, errors.New("memberlist does not support DecodeMultiKey")
+}
+
+func (d distributedCounterCodec) EncodeMultiKey(interface{}) (map[string][]byte, error) {
+	return nil, errors.New("memberlist does not support EncodeMultiKey")
 }
 
 var _ codec.Codec = &distributedCounterCodec{}
