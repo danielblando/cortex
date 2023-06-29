@@ -2250,7 +2250,7 @@ func startLifecycler(t *testing.T, cfg Config, heartbeat time.Duration, lifecycl
 func TestShuffleShardWithCaching(t *testing.T) {
 	inmem, closer := consul.NewInMemoryClientWithConfig(GetCodec(), consul.Config{
 		MaxCasRetries: 20,
-		CasRetryDelay: 500 * time.Millisecond,
+		CasRetryDelay: 100 * time.Millisecond,
 	}, log.NewNopLogger(), nil)
 	t.Cleanup(func() { assert.NoError(t, closer.Close()) })
 
@@ -2278,8 +2278,6 @@ func TestShuffleShardWithCaching(t *testing.T) {
 
 		lcs = append(lcs, lc)
 	}
-
-	time.Sleep(5 * time.Second)
 
 	// Wait until all instances in the ring are ACTIVE.
 	test.Poll(t, 5*time.Second, numLifecyclers, func() interface{} {
