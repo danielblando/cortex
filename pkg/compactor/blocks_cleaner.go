@@ -333,6 +333,8 @@ func (c *BlocksCleaner) cleanUser(ctx context.Context, userID string, firstRun b
 		return err
 	}
 
+	w := bucketindex.NewUpdater(c.bucketClient, userID, c.cfgProvider, c.logger)
+
 	// Mark blocks for future deletion based on the retention period for the user.
 	// Note doing this before UpdateIndex, so it reads in the deletion marks.
 	// The trade-off being that retention is not applied if the index has to be
@@ -342,27 +344,28 @@ func (c *BlocksCleaner) cleanUser(ctx context.Context, userID string, firstRun b
 		// error occurs here. Errors are logged in the function.
 		retention := c.cfgProvider.CompactorBlocksRetentionPeriod(userID)
 		c.applyUserRetentionPeriod(ctx, idx, retention, userBucket, userLogger)
+	} else {
+		idx = w.GenerateIndex(nil, nil)
 	}
 
-	// Generate an updated in-memory version of the bucket index.
-	w := bucketindex.NewUpdater(c.bucketClient, userID, c.cfgProvider, c.logger)
-	idx, partials, totalBlocksBlocksMarkedForNoCompaction, err := w.UpdateIndex(ctx, idx)
+	// Generate a list of blocks marked for deletion as well as a list of blocks mark to skip comapction
+	blocksWithDeletionMarker, totalBlocksBlocksMarkedForNoCompaction, err := w.UpdateBlockMarks(ctx, idx.BlockDeletionMarks)
 	if err != nil {
 		return err
 	}
 
-	// Delete blocks marked for deletion. We iterate over a copy of deletion marks because
-	// we'll need to manipulate the index (removing blocks which get deleted).
-	blocksToDelete := make([]interface{}, 0, len(idx.BlockDeletionMarks))
+	// Delete blocks marked for deletion.
+	blocksToDelete := make([]interface{}, 0, len(blocksWithDeletionMarker))
+	blocksDeleted := make(map[ulid.ULID]struct{}, len(blocksToDelete))
 	var mux sync.Mutex
-	for _, mark := range idx.BlockDeletionMarks.Clone() {
+	for _, mark := range blocksWithDeletionMarker {
 		if time.Since(mark.GetDeletionTime()).Seconds() <= c.cfg.DeletionDelay.Seconds() {
 			continue
 		}
 		blocksToDelete = append(blocksToDelete, mark.ID)
 	}
 
-	// Concurrently deletes blocks marked for deletion, and removes blocks from index.
+	// Concurrently deletes blocks marked for deletion
 	_ = concurrency.ForEach(ctx, blocksToDelete, defaultDeleteBlocksConcurrency, func(ctx context.Context, job interface{}) error {
 		blockID := job.(ulid.ULID)
 
@@ -372,9 +375,8 @@ func (c *BlocksCleaner) cleanUser(ctx context.Context, userID string, firstRun b
 			return nil
 		}
 
-		// Remove the block from the bucket index too.
 		mux.Lock()
-		idx.RemoveBlock(blockID)
+		blocksDeleted[blockID] = struct{}{}
 		mux.Unlock()
 
 		c.blocksCleanedTotal.Inc()
@@ -382,43 +384,8 @@ func (c *BlocksCleaner) cleanUser(ctx context.Context, userID string, firstRun b
 		return nil
 	})
 
-	// Partial blocks with a deletion mark can be cleaned up. This is a best effort, so we don't return
-	// error if the cleanup of partial blocks fail.
-	if len(partials) > 0 {
-		c.cleanUserPartialBlocks(ctx, partials, idx, userBucket, userLogger)
-	}
-
-	// Upload the updated index to the storage.
-	if err := bucketindex.WriteIndex(ctx, c.bucketClient, userID, c.cfgProvider, idx); err != nil {
-		return err
-	}
-
-	c.tenantBlocks.WithLabelValues(userID).Set(float64(len(idx.Blocks)))
-	c.tenantBlocksMarkedForDelete.WithLabelValues(userID).Set(float64(len(idx.BlockDeletionMarks)))
-	c.tenantBlocksMarkedForNoCompaction.WithLabelValues(userID).Set(float64(totalBlocksBlocksMarkedForNoCompaction))
-	c.tenantBucketIndexLastUpdate.WithLabelValues(userID).SetToCurrentTime()
-	c.tenantPartialBlocks.WithLabelValues(userID).Set(float64(len(partials)))
-
-	return nil
-}
-
-// cleanUserPartialBlocks delete partial blocks which are safe to be deleted. The provided partials map
-// and index are updated accordingly.
-func (c *BlocksCleaner) cleanUserPartialBlocks(ctx context.Context, partials map[ulid.ULID]error, idx *bucketindex.Index, userBucket objstore.InstrumentedBucket, userLogger log.Logger) {
-	// Collect all blocks with missing meta.json into buffered channel.
-	blocks := make([]interface{}, 0, len(partials))
-
-	for blockID, blockErr := range partials {
-		// We can safely delete only blocks which are partial because the meta.json is missing.
-		if !errors.Is(blockErr, bucketindex.ErrBlockMetaNotFound) {
-			continue
-		}
-		blocks = append(blocks, blockID)
-	}
-
-	var mux sync.Mutex
-
-	_ = concurrency.ForEach(ctx, blocks, defaultDeleteBlocksConcurrency, func(ctx context.Context, job interface{}) error {
+	//Update existent blocks. It will also clean partitial blocks returning a count for existent partials.
+	blocks, totalPartialBlocks, err := w.EvaluateBlocks(ctx, idx.Blocks.MapOfULIDs(), func(ctx context.Context, job interface{}) bool {
 		blockID := job.(ulid.ULID)
 		// We can safely delete only partial blocks with a deletion mark.
 		err := metadata.ReadMarker(ctx, userLogger, userBucket, blockID.String(), &metadata.DeletionMark{})
@@ -437,11 +404,11 @@ func (c *BlocksCleaner) cleanUserPartialBlocks(ctx context.Context, partials map
 			if isEmpty || notVisitMarkerError != nil {
 				// skip deleting partial block if block directory
 				// is empty or non visit marker file exists
-				return nil
+				return false
 			}
 		} else if err != nil {
 			level.Warn(userLogger).Log("msg", "error reading partial block deletion mark", "block", blockID, "err", err)
-			return nil
+			return false
 		}
 
 		// Hard-delete partial blocks having a deletion mark, even if the deletion threshold has not
@@ -449,19 +416,41 @@ func (c *BlocksCleaner) cleanUserPartialBlocks(ctx context.Context, partials map
 		if err := block.Delete(ctx, userLogger, userBucket, blockID); err != nil {
 			c.blocksFailedTotal.Inc()
 			level.Warn(userLogger).Log("msg", "error deleting partial block marked for deletion", "block", blockID, "err", err)
-			return nil
+			return false
 		}
 
-		// Remove the block from the bucket index too.
-		mux.Lock()
-		idx.RemoveBlock(blockID)
-		delete(partials, blockID)
-		mux.Unlock()
+		blocksDeleted[blockID] = struct{}{}
 
 		c.blocksCleanedTotal.Inc()
 		level.Info(userLogger).Log("msg", "deleted partial block marked for deletion", "block", blockID)
-		return nil
+		return true
 	})
+	if err != nil {
+		return err
+	}
+
+	//Update blocksWithDeletionMarker to be used to create the index
+	for i := 0; i < len(blocksWithDeletionMarker); i++ {
+		if _, ok := blocksDeleted[blocksWithDeletionMarker[i].ID]; ok {
+			blocksWithDeletionMarker = append(blocksWithDeletionMarker[:i], blocksWithDeletionMarker[i+1:]...)
+			i--
+		}
+	}
+
+	idx = w.GenerateIndex(blocks, blocksWithDeletionMarker)
+
+	// Upload the updated index to the storage.
+	if err := bucketindex.WriteIndex(ctx, c.bucketClient, userID, c.cfgProvider, w.GenerateIndex(blocks, blocksWithDeletionMarker)); err != nil {
+		return err
+	}
+
+	c.tenantBlocks.WithLabelValues(userID).Set(float64(len(idx.Blocks)))
+	c.tenantBlocksMarkedForDelete.WithLabelValues(userID).Set(float64(len(idx.BlockDeletionMarks)))
+	c.tenantBlocksMarkedForNoCompaction.WithLabelValues(userID).Set(float64(totalBlocksBlocksMarkedForNoCompaction))
+	c.tenantBucketIndexLastUpdate.WithLabelValues(userID).SetToCurrentTime()
+	c.tenantPartialBlocks.WithLabelValues(userID).Set(float64(totalPartialBlocks))
+
+	return nil
 }
 
 // applyUserRetentionPeriod marks blocks for deletion which have aged past the retention period.

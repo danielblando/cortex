@@ -246,6 +246,14 @@ func (s Blocks) GetULIDs() []ulid.ULID {
 	return ids
 }
 
+func (s Blocks) MapOfULIDs() map[ulid.ULID]*Block {
+	ids := make(map[ulid.ULID]*Block, len(s))
+	for _, m := range s {
+		ids[m.ID] = m
+	}
+	return ids
+}
+
 func (s Blocks) String() string {
 	b := strings.Builder{}
 

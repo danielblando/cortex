@@ -44,6 +44,58 @@ func NewUpdater(bkt objstore.Bucket, userID string, cfgProvider bucket.TenantCon
 	}
 }
 
+func (w *Updater) EvaluateBlocks(ctx context.Context, oldBlocks map[ulid.ULID]*Block, partialFunc func(ctx context.Context, job interface{}) bool) ([]*Block, int64, error) {
+	var blocks []*Block
+	totalPartials := int64(0)
+
+	// Find all blocks in the storage.
+	err := w.bkt.Iter(ctx, "", func(name string) error {
+		if id, ok := block.IsBlockDir(name); ok {
+			if _, ok := oldBlocks[id]; ok {
+				// Existent block that continue to exist
+				blocks = append(blocks, oldBlocks[id])
+			} else {
+				//Discovered block
+				b, err := w.updateBlockIndexEntry(ctx, id)
+				if err == nil {
+					// New block that now exist
+					blocks = append(blocks, b)
+				} else if errors.Is(err, ErrBlockMetaNotFound) {
+					if deleted := partialFunc(ctx, id); deleted {
+						totalPartials++
+					}
+					level.Warn(w.logger).Log("msg", "skipped partial block when updating bucket index", "block", id.String())
+				} else if errors.Is(err, errBlockMetaKeyAccessDeniedErr) {
+					totalPartials++
+					level.Warn(w.logger).Log("msg", "skipped partial block when updating bucket index due key permission", "block", id.String())
+				} else if errors.Is(err, ErrBlockMetaCorrupted) {
+					totalPartials++
+					level.Error(w.logger).Log("msg", "skipped block with corrupted meta.json when updating bucket index", "block", id.String(), "err", err)
+				} else {
+					return err
+				}
+
+				return nil
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, totalPartials, errors.Wrap(err, "list blocks")
+	}
+
+	return blocks, totalPartials, nil
+}
+
+func (w *Updater) GenerateIndex(blocks []*Block, blockDeletionMarks []*BlockDeletionMark) *Index {
+	return &Index{
+		Version:            IndexVersion1,
+		Blocks:             blocks,
+		BlockDeletionMarks: blockDeletionMarks,
+		UpdatedAt:          time.Now().Unix(),
+	}
+}
+
 // UpdateIndex generates the bucket index and returns it, without storing it to the storage.
 // If the old index is not passed in input, then the bucket index will be generated from scratch.
 func (w *Updater) UpdateIndex(ctx context.Context, old *Index) (*Index, map[ulid.ULID]error, int64, error) {
@@ -61,7 +113,7 @@ func (w *Updater) UpdateIndex(ctx context.Context, old *Index) (*Index, map[ulid
 		return nil, nil, 0, err
 	}
 
-	blockDeletionMarks, totalBlocksBlocksMarkedForNoCompaction, err := w.updateBlockMarks(ctx, oldBlockDeletionMarks)
+	blockDeletionMarks, totalBlocksBlocksMarkedForNoCompaction, err := w.UpdateBlockMarks(ctx, oldBlockDeletionMarks)
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -175,7 +227,7 @@ func (w *Updater) updateBlockIndexEntry(ctx context.Context, id ulid.ULID) (*Blo
 	return block, nil
 }
 
-func (w *Updater) updateBlockMarks(ctx context.Context, old []*BlockDeletionMark) ([]*BlockDeletionMark, int64, error) {
+func (w *Updater) UpdateBlockMarks(ctx context.Context, old []*BlockDeletionMark) ([]*BlockDeletionMark, int64, error) {
 	out := make([]*BlockDeletionMark, 0, len(old))
 	discovered := map[ulid.ULID]struct{}{}
 	totalBlocksBlocksMarkedForNoCompaction := int64(0)
