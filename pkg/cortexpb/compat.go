@@ -60,24 +60,8 @@ func FromLabelAdaptersToLabelsWithCopy(input []LabelAdapter) labels.Labels {
 
 // Efficiently copies labels input slice. To be used in cases where input slice
 // can be reused, but long-term copy is needed.
-func CopyLabels(input []labels.Label) labels.Labels {
-	result := make(labels.Labels, len(input))
-
-	size := 0
-	for _, l := range input {
-		size += len(l.Name)
-		size += len(l.Value)
-	}
-
-	// Copy all strings into the buffer, and use 'yoloString' to convert buffer
-	// slices to strings.
-	buf := make([]byte, size)
-
-	for i, l := range input {
-		result[i].Name, buf = copyStringToBuffer(l.Name, buf)
-		result[i].Value, buf = copyStringToBuffer(l.Value, buf)
-	}
-	return result
+func CopyLabels(input labels.Labels) labels.Labels {
+	return input.Copy()
 }
 
 // Copies string to buffer (which must be big enough), and converts buffer slice containing
