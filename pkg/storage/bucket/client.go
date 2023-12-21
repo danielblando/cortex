@@ -57,7 +57,7 @@ type Config struct {
 
 	// Not used internally, meant to allow callers to wrap Buckets
 	// created using this config
-	Middlewares []func(objstore.InstrumentedBucket) (objstore.InstrumentedBucket, error) `yaml:"-"`
+	Middlewares []func(bucket objstore.Bucket) (objstore.Bucket, error) `yaml:"-"`
 
 	// Used to inject additional backends into the config. Allows for this config to
 	// be embedded in multiple contexts and support non-object storage based backends.
@@ -124,15 +124,15 @@ func NewClient(ctx context.Context, cfg Config, name string, logger log.Logger, 
 		return nil, err
 	}
 
-	iClient := opentracing.WrapWithTraces(bucketWithMetrics(client, name, reg))
-
 	// Wrap the client with any provided middleware
 	for _, wrap := range cfg.Middlewares {
-		iClient, err = wrap(iClient)
+		client, err = wrap(client)
 		if err != nil {
 			return nil, err
 		}
 	}
+
+	iClient := opentracing.WrapWithTraces(bucketWithMetrics(client, name, reg))
 
 	return iClient, nil
 }

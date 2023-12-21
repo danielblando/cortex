@@ -179,8 +179,8 @@ func TestBucketWithGlobalMarkers_ShouldRetryUpload(t *testing.T) {
 		globalpath string
 	}{
 		{
-			mark:       metadata.DeletionMarkFilename,
-			globalpath: "markers/" + block1.String() + "-deletion-mark.json",
+			mark:       "teste" + metadata.DeletionMarkFilename,
+			globalpath: "markers/" + block1.String() + "-testdeletion-mark.json",
 		},
 		{
 			mark:       metadata.NoCompactMarkFilename,
@@ -191,12 +191,15 @@ func TestBucketWithGlobalMarkers_ShouldRetryUpload(t *testing.T) {
 	for _, tc := range tests {
 		for _, p := range prefixErrors {
 			t.Run(tc.mark+"/"+p, func(t *testing.T) {
+				reg := prometheus.NewPedanticRegistry()
+
 				mBucket := &cortex_testutil.MockBucketFailure{
 					Bucket:         bkt,
 					UploadFailures: map[string]error{p: errors.New("test")},
 				}
 				s3Bkt, _ := s3.NewBucketWithRetries(mBucket, 5, 0, 0, log.NewNopLogger())
 				bkt = BucketWithGlobalMarkers(objstore.WithNoopInstr(s3Bkt))
+				bkt = objstore.WrapWithMetrics(bkt, prometheus.WrapRegistererWithPrefix("thanos_", reg), "")
 				originalPath := block1.String() + "/" + tc.mark
 				err := bkt.Upload(ctx, originalPath, strings.NewReader("{}"))
 				require.Equal(t, errors.New("test"), err)

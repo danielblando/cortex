@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"path"
+	"strings"
 
 	"github.com/thanos-io/objstore"
 	"github.com/thanos-io/thanos/pkg/block"
@@ -18,7 +19,7 @@ type globalMarkersBucket struct {
 
 // BucketWithGlobalMarkers wraps the input bucket into a bucket which also keeps track of markers
 // in the global markers location.
-func BucketWithGlobalMarkers(b objstore.InstrumentedBucket) objstore.InstrumentedBucket {
+func BucketWithGlobalMarkers(b objstore.Bucket) objstore.InstrumentedBucket {
 	return &globalMarkersBucket{
 		parent: b,
 	}
@@ -28,6 +29,14 @@ func BucketWithGlobalMarkers(b objstore.InstrumentedBucket) objstore.Instrumente
 func (b *globalMarkersBucket) Upload(ctx context.Context, name string, r io.Reader) error {
 	globalMarkPath, ok := b.isMark(name)
 	if !ok {
+		if strings.Contains(name, "deletion-mark") || strings.Contains(name, "meta.json") ||
+			strings.Contains(name, "visit-mark") || strings.Contains(name, "partition-info") {
+			body, err := io.ReadAll(r)
+			if err != nil {
+				return err
+			}
+			return b.parent.Upload(ctx, name, bytes.NewReader(body))
+		}
 		return b.parent.Upload(ctx, name, r)
 	}
 

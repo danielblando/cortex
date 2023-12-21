@@ -349,6 +349,9 @@ type Compactor struct {
 // NewCompactor makes a new Compactor.
 func NewCompactor(compactorCfg Config, storageCfg cortex_tsdb.BlocksStorageConfig, logger log.Logger, registerer prometheus.Registerer, limits *validation.Overrides) (*Compactor, error) {
 	bucketClientFactory := func(ctx context.Context) (objstore.InstrumentedBucket, error) {
+		storageCfg.Bucket.Middlewares = append(storageCfg.Bucket.Middlewares, func(bucket objstore.Bucket) (objstore.Bucket, error) {
+			return bucketindex.BucketWithGlobalMarkers(bucket), nil
+		})
 		return bucket.NewClient(ctx, storageCfg.Bucket, "compactor", logger, registerer)
 	}
 
@@ -514,7 +517,7 @@ func (c *Compactor) starting(ctx context.Context) error {
 	}
 
 	// Wrap the bucket client to write block deletion marks in the global location too.
-	c.bucketClient = bucketindex.BucketWithGlobalMarkers(c.bucketClient)
+	//c.bucketClient = bucketindex.BucketWithGlobalMarkers(c.bucketClient)
 
 	// Create the users scanner.
 	c.usersScanner = cortex_tsdb.NewUsersScanner(c.bucketClient, c.ownUserForCleanUp, c.parentLogger)
