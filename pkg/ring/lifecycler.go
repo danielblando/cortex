@@ -131,6 +131,8 @@ type Lifecycler struct {
 	RingKey  string
 	Zone     string
 
+	zonalRingTokens []uint32
+
 	// Whether to flush if transfer fails on shutdown.
 	flushOnShutdown      *atomic.Bool
 	unregisterOnShutdown *atomic.Bool
@@ -282,7 +284,7 @@ func (i *Lifecycler) CheckReady(ctx context.Context) error {
 
 func (i *Lifecycler) checkRingHealthForReadiness(ctx context.Context) error {
 	// Ensure the instance holds some tokens.
-	if len(i.getTokens()) == 0 {
+	if len(i.GetTokens()) == 0 {
 		return fmt.Errorf("this instance owns no tokens")
 	}
 
@@ -362,7 +364,7 @@ func (i *Lifecycler) ChangeState(ctx context.Context, state InstanceState) error
 	return <-errCh
 }
 
-func (i *Lifecycler) getTokens() Tokens {
+func (i *Lifecycler) GetTokens() Tokens {
 	i.stateMtx.RLock()
 	defer i.stateMtx.RUnlock()
 	return i.tokenFile.Tokens
@@ -913,7 +915,7 @@ func (i *Lifecycler) verifyTokens(ctx context.Context) bool {
 func (i *Lifecycler) compareTokens(fromRing Tokens) bool {
 	sort.Sort(fromRing)
 
-	tokens := i.getTokens()
+	tokens := i.GetTokens()
 	sort.Sort(tokens)
 
 	if len(tokens) != len(fromRing) {
@@ -945,14 +947,14 @@ func (i *Lifecycler) autoJoin(ctx context.Context, targetState InstanceState, al
 		// Need to make sure we didn't change the num of tokens configured
 		myTokens, _ := ringDesc.TokensFor(i.ID)
 		if !alreadyInRing {
-			myTokens = i.getTokens()
+			myTokens = i.GetTokens()
 		}
 		needTokens := i.cfg.NumTokens - len(myTokens)
 
-		if needTokens == 0 && myTokens.Equals(i.getTokens()) {
+		if needTokens == 0 && myTokens.Equals(i.GetTokens()) {
 			// Tokens have been verified. No need to change them.
 			state := i.GetState()
-			ringDesc.AddIngester(i.ID, i.Addr, i.Zone, i.getTokens(), state, i.getRegisteredAt())
+			ringDesc.AddIngester(i.ID, i.Addr, i.Zone, i.GetTokens(), state, i.getRegisteredAt())
 			level.Info(i.logger).Log("msg", "auto joined with existing tokens", "ring", i.RingName, "state", state)
 			return ringDesc, true, nil
 		}
@@ -968,7 +970,7 @@ func (i *Lifecycler) autoJoin(ctx context.Context, targetState InstanceState, al
 		i.setTokens(myTokens)
 
 		state := i.GetState()
-		ringDesc.AddIngester(i.ID, i.Addr, i.Zone, i.getTokens(), state, i.getRegisteredAt())
+		ringDesc.AddIngester(i.ID, i.Addr, i.Zone, i.GetTokens(), state, i.getRegisteredAt())
 		level.Info(i.logger).Log("msg", "auto joined with new tokens", "ring", i.RingName, "state", state)
 
 		return ringDesc, true, nil
@@ -980,6 +982,10 @@ func (i *Lifecycler) autoJoin(ctx context.Context, targetState InstanceState, al
 	}
 
 	return err
+}
+
+func (i *Lifecycler) GetZonalRingTokens() []uint32 {
+	return i.zonalRingTokens
 }
 
 // updateConsul updates our entries in consul, heartbeating and dealing with
@@ -998,7 +1004,7 @@ func (i *Lifecycler) updateConsul(ctx context.Context) error {
 		if !ok {
 			// consul must have restarted
 			level.Info(i.logger).Log("msg", "found empty ring, inserting tokens", "ring", i.RingName)
-			ringDesc.AddIngester(i.ID, i.Addr, i.Zone, i.getTokens(), i.GetState(), i.getRegisteredAt())
+			ringDesc.AddIngester(i.ID, i.Addr, i.Zone, i.GetTokens(), i.GetState(), i.getRegisteredAt())
 		} else {
 			instanceDesc.Timestamp = time.Now().Unix()
 			instanceDesc.State = i.GetState()
@@ -1008,6 +1014,8 @@ func (i *Lifecycler) updateConsul(ctx context.Context) error {
 			ringDesc.Ingesters[i.ID] = instanceDesc
 		}
 		i.delegate.OnRingInstanceHeartbeat(i, ringDesc)
+
+		i.zonalRingTokens = ringDesc.getTokensByZone()[i.Zone]
 
 		return ringDesc, true, nil
 	})

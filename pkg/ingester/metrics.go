@@ -46,6 +46,7 @@ type ingesterMetrics struct {
 	memMetadataRemovedTotal *prometheus.CounterVec
 
 	activeSeriesPerUser   *prometheus.GaugeVec
+	ownedSeriesPerUser    *prometheus.GaugeVec
 	activeNHSeriesPerUser *prometheus.GaugeVec
 	limitsPerLabelSet     *prometheus.GaugeVec
 	usagePerLabelSet      *prometheus.GaugeVec
@@ -257,6 +258,12 @@ func newIngesterMetrics(r prometheus.Registerer,
 		}, []string{"user"}),
 
 		// Not registered automatically, but only if activeSeriesEnabled is true.
+		ownedSeriesPerUser: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "cortex_ingester_owned_series",
+			Help: "Number of currently owned series per user.",
+		}, []string{"user"}),
+
+		// Not registered automatically, but only if activeSeriesEnabled is true.
 		activeNHSeriesPerUser: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "cortex_ingester_active_native_histogram_series",
 			Help: "Number of currently active native histogram series per user.",
@@ -269,6 +276,7 @@ func newIngesterMetrics(r prometheus.Registerer,
 
 	if activeSeriesEnabled && r != nil {
 		r.MustRegister(m.activeSeriesPerUser)
+		r.MustRegister(m.ownedSeriesPerUser)
 		r.MustRegister(m.activeNHSeriesPerUser)
 	}
 
@@ -292,6 +300,7 @@ func (m *ingesterMetrics) deletePerUserMetrics(userID string) {
 	m.memMetadataCreatedTotal.DeleteLabelValues(userID)
 	m.memMetadataRemovedTotal.DeleteLabelValues(userID)
 	m.activeSeriesPerUser.DeleteLabelValues(userID)
+	m.ownedSeriesPerUser.DeleteLabelValues(userID)
 	m.activeNHSeriesPerUser.DeleteLabelValues(userID)
 	m.usagePerLabelSet.DeletePartialMatch(prometheus.Labels{"user": userID})
 	m.limitsPerLabelSet.DeletePartialMatch(prometheus.Labels{"user": userID})

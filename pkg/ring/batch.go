@@ -3,6 +3,9 @@ package ring
 import (
 	"context"
 	"fmt"
+	"github.com/cortexproject/cortex/pkg/cortexpb"
+	ingester_client "github.com/cortexproject/cortex/pkg/ingester/client"
+	"github.com/cortexproject/cortex/pkg/util/extract"
 	"sync"
 
 	"go.uber.org/atomic"
@@ -57,6 +60,52 @@ func (i *itemTracker) getError() error {
 	}
 
 	return i.err4xx.Load()
+}
+
+func TokenForLabels(userID string, labels []cortexpb.LabelAdapter, shouldShardByAllLabels bool) (uint32, error) {
+	if shouldShardByAllLabels {
+		return shardByAllLabels(userID, labels), nil
+	}
+
+	unsafeMetricName, err := extract.UnsafeMetricNameFromLabelAdapters(labels)
+	if err != nil {
+		return 0, err
+	}
+	return shardByMetricName(userID, unsafeMetricName), nil
+}
+
+func TokenForMetadata(userID string, metricName string, shouldShardByAllLabels bool) uint32 {
+	if shouldShardByAllLabels {
+		return shardByMetricName(userID, metricName)
+	}
+
+	return shardByUser(userID)
+}
+
+// This function generates different values for different order of same labels.
+func shardByAllLabels(userID string, labels []cortexpb.LabelAdapter) uint32 {
+	h := shardByUser(userID)
+	for _, label := range labels {
+		if len(label.Value) > 0 {
+			h = ingester_client.HashAdd32(h, label.Name)
+			h = ingester_client.HashAdd32(h, label.Value)
+		}
+	}
+	return h
+}
+
+// shardByMetricName returns the token for the given metric. The provided metricName
+// is guaranteed to not be retained.
+func shardByMetricName(userID string, metricName string) uint32 {
+	h := shardByUser(userID)
+	h = ingester_client.HashAdd32(h, metricName)
+	return h
+}
+
+func shardByUser(userID string) uint32 {
+	h := ingester_client.HashNew32()
+	h = ingester_client.HashAdd32(h, userID)
+	return h
 }
 
 // DoBatch request against a set of keys in the ring, handling replication and
