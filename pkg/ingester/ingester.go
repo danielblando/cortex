@@ -1062,8 +1062,9 @@ func (i *Ingester) updateActiveSeries(ctx context.Context) {
 			continue
 		}
 
-		userDB.activeSeries.Purge(purgeTime)
+		userDB.activeSeries.UpdateMetrics(purgeTime, i.lifecycler.GetTokens(), i.lifecycler.GeRingTokensForZone(i.lifecycler.Zone))
 		i.metrics.activeSeriesPerUser.WithLabelValues(userID).Set(float64(userDB.activeSeries.Active()))
+		i.metrics.ownedSeriesPerUser.WithLabelValues(userID).Set(float64(userDB.activeSeries.Owned()))
 		i.metrics.activeNHSeriesPerUser.WithLabelValues(userID).Set(float64(userDB.activeSeries.ActiveNativeHistogram()))
 		if err := userDB.labelSetCounter.UpdateMetric(ctx, userDB, i.metrics); err != nil {
 			level.Warn(i.logger).Log("msg", "failed to update per labelSet metrics", "user", userID, "err", err)
@@ -1322,6 +1323,10 @@ func (i *Ingester) Push(ctx context.Context, req *cortexpb.WriteRequest) (*corte
 			i.metrics.oooLabelsTotal.WithLabelValues(userID).Inc()
 			return nil, wrapWithUser(errors.Errorf("out-of-order label set found when push: %s", tsLabels), userID)
 		}
+		tsToken, err := ring.TokenForLabels(userID, ts.Labels, i.cfg.DistributorShardByAllLabels)
+		if err != nil {
+			return nil, wrapWithUser(err, userID)
+		}
 		tsLabelsHash := tsLabels.Hash()
 		ref, copiedLabels := app.GetRef(tsLabels, tsLabelsHash)
 
@@ -1422,7 +1427,7 @@ func (i *Ingester) Push(ctx context.Context, req *cortexpb.WriteRequest) (*corte
 		isNHAppended := succeededHistogramsCount > oldSucceededHistogramsCount
 		shouldUpdateSeries := (succeededSamplesCount > oldSucceededSamplesCount) || isNHAppended
 		if i.cfg.ActiveSeriesMetricsEnabled && shouldUpdateSeries {
-			db.activeSeries.UpdateSeries(tsLabels, tsLabelsHash, startAppend, isNHAppended, func(l labels.Labels) labels.Labels {
+			db.activeSeries.UpdateSeries(tsLabels, tsLabelsHash, tsToken, startAppend, isNHAppended, func(l labels.Labels) labels.Labels {
 				// we must already have copied the labels if succeededSamplesCount or succeededHistogramsCount has been incremented.
 				return copiedLabels
 			})
@@ -2624,6 +2629,7 @@ func (i *Ingester) closeAllTSDB() {
 
 			i.metrics.memUsers.Dec()
 			i.metrics.activeSeriesPerUser.DeleteLabelValues(userID)
+			i.metrics.ownedSeriesPerUser.DeleteLabelValues(userID)
 			i.metrics.activeNHSeriesPerUser.DeleteLabelValues(userID)
 		}(userDB)
 	}
@@ -2883,7 +2889,7 @@ func (i *Ingester) compactionLoop(ctx context.Context) error {
 		}
 
 		// Lets create the slot based on the hash id
-		i := int(client.HashAdd32(client.HashNew32(), i.lifecycler.ID) % 10)
+		i := int(util.HashAdd32(util.HashNew32(), i.lifecycler.ID) % 10)
 		return i, 10
 	}
 	ticker := util.NewSlottedTicker(infoFunc, i.cfg.BlocksStorageConfig.TSDB.HeadCompactionInterval, 1)
@@ -2955,6 +2961,10 @@ func (i *Ingester) compactBlocks(ctx context.Context, force bool, allowed *util.
 			level.Warn(logutil.WithContext(ctx, i.logger)).Log("msg", "TSDB blocks compaction for user has failed", "user", userID, "err", err, "compactReason", reason)
 		} else {
 			level.Debug(logutil.WithContext(ctx, i.logger)).Log("msg", "TSDB blocks compaction completed successfully", "user", userID, "compactReason", reason)
+		}
+
+		if i.cfg.ActiveSeriesMetricsEnabled {
+			userDB.activeSeries.Purge(userDB.Head().MinTime())
 		}
 
 		return nil

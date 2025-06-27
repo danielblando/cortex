@@ -534,6 +534,27 @@ func (d *Desc) getTokensByZone() map[string][]uint32 {
 	return MergeTokensByZone(zones)
 }
 
+// getTempTokensByZone returns instances tokens grouped by zone. Tokens within each zone
+// are guaranteed to be sorted.
+func (d *Desc) getTempTokensByZone() map[string][]uint32 {
+	zones := map[string][][]uint32{}
+	for _, instance := range d.Ingesters {
+		if instance.State == READONLY {
+			continue
+		}
+		// Tokens may not be sorted for an older version which, so we enforce sorting here.
+		tokens := instance.Tokens
+		if !sort.IsSorted(Tokens(tokens)) {
+			sort.Sort(Tokens(tokens))
+		}
+
+		zones[instance.Zone] = append(zones[instance.Zone], tokens)
+	}
+
+	// Merge tokens per zone.
+	return MergeTokensByZone(zones)
+}
+
 // getInstancesByAddr returns instances id by its address
 func (d *Desc) getInstancesByAddr() map[string]string {
 	instancesByAddMap := make(map[string]string, len(d.Ingesters))

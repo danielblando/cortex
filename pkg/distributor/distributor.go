@@ -35,7 +35,6 @@ import (
 	ring_client "github.com/cortexproject/cortex/pkg/ring/client"
 	"github.com/cortexproject/cortex/pkg/tenant"
 	"github.com/cortexproject/cortex/pkg/util"
-	"github.com/cortexproject/cortex/pkg/util/extract"
 	"github.com/cortexproject/cortex/pkg/util/labelset"
 	"github.com/cortexproject/cortex/pkg/util/limiter"
 	util_log "github.com/cortexproject/cortex/pkg/util/log"
@@ -532,52 +531,6 @@ func (d *Distributor) stopping(_ error) error {
 	return services.StopManagerAndAwaitStopped(context.Background(), d.subservices)
 }
 
-func (d *Distributor) tokenForLabels(userID string, labels []cortexpb.LabelAdapter) (uint32, error) {
-	if d.cfg.ShardByAllLabels {
-		return shardByAllLabels(userID, labels), nil
-	}
-
-	unsafeMetricName, err := extract.UnsafeMetricNameFromLabelAdapters(labels)
-	if err != nil {
-		return 0, err
-	}
-	return shardByMetricName(userID, unsafeMetricName), nil
-}
-
-func (d *Distributor) tokenForMetadata(userID string, metricName string) uint32 {
-	if d.cfg.ShardByAllLabels {
-		return shardByMetricName(userID, metricName)
-	}
-
-	return shardByUser(userID)
-}
-
-// shardByMetricName returns the token for the given metric. The provided metricName
-// is guaranteed to not be retained.
-func shardByMetricName(userID string, metricName string) uint32 {
-	h := shardByUser(userID)
-	h = ingester_client.HashAdd32(h, metricName)
-	return h
-}
-
-func shardByUser(userID string) uint32 {
-	h := ingester_client.HashNew32()
-	h = ingester_client.HashAdd32(h, userID)
-	return h
-}
-
-// This function generates different values for different order of same labels.
-func shardByAllLabels(userID string, labels []cortexpb.LabelAdapter) uint32 {
-	h := shardByUser(userID)
-	for _, label := range labels {
-		if len(label.Value) > 0 {
-			h = ingester_client.HashAdd32(h, label.Name)
-			h = ingester_client.HashAdd32(h, label.Value)
-		}
-	}
-	return h
-}
-
 // Remove the label labelname from a slice of LabelPairs if it exists.
 func removeLabel(labelName string, labels *[]cortexpb.LabelAdapter) {
 	for i := 0; i < len(*labels); i++ {
@@ -939,7 +892,7 @@ func (d *Distributor) prepareMetadataKeys(req *cortexpb.WriteRequest, limits *va
 			continue
 		}
 
-		metadataKeys = append(metadataKeys, d.tokenForMetadata(userID, m.MetricFamilyName))
+		metadataKeys = append(metadataKeys, ring.TokenForMetadata(userID, m.MetricFamilyName, d.cfg.ShardByAllLabels))
 		validatedMetadata = append(validatedMetadata, m)
 	}
 	return metadataKeys, validatedMetadata, firstPartialErr
@@ -1066,7 +1019,7 @@ func (d *Distributor) prepareSeriesKeys(ctx context.Context, req *cortexpb.Write
 
 		// Generate the sharding token based on the series labels without the HA replica
 		// label and dropped labels (if any)
-		key, err := d.tokenForLabels(userID, ts.Labels)
+		key, err := ring.TokenForLabels(userID, ts.Labels, d.cfg.ShardByAllLabels)
 		if err != nil {
 			return nil, nil, nil, nil, 0, 0, 0, nil, err
 		}

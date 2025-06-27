@@ -155,6 +155,7 @@ type Lifecycler struct {
 	healthyInstancesCount int
 	zonesCount            int
 	zones                 []string
+	ringTokensByZone      map[string][]uint32
 
 	lifecyclerMetrics *LifecyclerMetrics
 	logger            log.Logger
@@ -282,7 +283,7 @@ func (i *Lifecycler) CheckReady(ctx context.Context) error {
 
 func (i *Lifecycler) checkRingHealthForReadiness(ctx context.Context) error {
 	// Ensure the instance holds some tokens.
-	if len(i.getTokens()) == 0 {
+	if len(i.GetTokens()) == 0 {
 		return fmt.Errorf("this instance owns no tokens")
 	}
 
@@ -362,7 +363,13 @@ func (i *Lifecycler) ChangeState(ctx context.Context, state InstanceState) error
 	return <-errCh
 }
 
-func (i *Lifecycler) getTokens() Tokens {
+func (i *Lifecycler) GeRingTokensForZone(zone string) []uint32 {
+	i.countersLock.RLock()
+	defer i.countersLock.RUnlock()
+	return i.ringTokensByZone[zone]
+}
+
+func (i *Lifecycler) GetTokens() Tokens {
 	i.stateMtx.RLock()
 	defer i.stateMtx.RUnlock()
 	return i.tokenFile.Tokens
@@ -913,7 +920,7 @@ func (i *Lifecycler) verifyTokens(ctx context.Context) bool {
 func (i *Lifecycler) compareTokens(fromRing Tokens) bool {
 	sort.Sort(fromRing)
 
-	tokens := i.getTokens()
+	tokens := i.GetTokens()
 	sort.Sort(tokens)
 
 	if len(tokens) != len(fromRing) {
@@ -945,14 +952,14 @@ func (i *Lifecycler) autoJoin(ctx context.Context, targetState InstanceState, al
 		// Need to make sure we didn't change the num of tokens configured
 		myTokens, _ := ringDesc.TokensFor(i.ID)
 		if !alreadyInRing {
-			myTokens = i.getTokens()
+			myTokens = i.GetTokens()
 		}
 		needTokens := i.cfg.NumTokens - len(myTokens)
 
-		if needTokens == 0 && myTokens.Equals(i.getTokens()) {
+		if needTokens == 0 && myTokens.Equals(i.GetTokens()) {
 			// Tokens have been verified. No need to change them.
 			state := i.GetState()
-			ringDesc.AddIngester(i.ID, i.Addr, i.Zone, i.getTokens(), state, i.getRegisteredAt())
+			ringDesc.AddIngester(i.ID, i.Addr, i.Zone, i.GetTokens(), state, i.getRegisteredAt())
 			level.Info(i.logger).Log("msg", "auto joined with existing tokens", "ring", i.RingName, "state", state)
 			return ringDesc, true, nil
 		}
@@ -968,7 +975,7 @@ func (i *Lifecycler) autoJoin(ctx context.Context, targetState InstanceState, al
 		i.setTokens(myTokens)
 
 		state := i.GetState()
-		ringDesc.AddIngester(i.ID, i.Addr, i.Zone, i.getTokens(), state, i.getRegisteredAt())
+		ringDesc.AddIngester(i.ID, i.Addr, i.Zone, i.GetTokens(), state, i.getRegisteredAt())
 		level.Info(i.logger).Log("msg", "auto joined with new tokens", "ring", i.RingName, "state", state)
 
 		return ringDesc, true, nil
@@ -998,7 +1005,7 @@ func (i *Lifecycler) updateConsul(ctx context.Context) error {
 		if !ok {
 			// consul must have restarted
 			level.Info(i.logger).Log("msg", "found empty ring, inserting tokens", "ring", i.RingName)
-			ringDesc.AddIngester(i.ID, i.Addr, i.Zone, i.getTokens(), i.GetState(), i.getRegisteredAt())
+			ringDesc.AddIngester(i.ID, i.Addr, i.Zone, i.GetTokens(), i.GetState(), i.getRegisteredAt())
 		} else {
 			instanceDesc.Timestamp = time.Now().Unix()
 			instanceDesc.State = i.GetState()
@@ -1053,6 +1060,7 @@ func (i *Lifecycler) changeState(ctx context.Context, state InstanceState) error
 func (i *Lifecycler) updateCounters(ringDesc *Desc) {
 	healthyInstancesCount := 0
 	zonesMap := map[string]struct{}{}
+	tokensByZone := map[string][]uint32{}
 
 	if ringDesc != nil {
 		lastUpdated := i.KVStore.LastUpdateTime(i.RingKey)
@@ -1065,6 +1073,7 @@ func (i *Lifecycler) updateCounters(ringDesc *Desc) {
 				healthyInstancesCount++
 			}
 		}
+		tokensByZone = ringDesc.getTempTokensByZone()
 	}
 
 	zones := make([]string, 0, len(zonesMap))
@@ -1079,6 +1088,7 @@ func (i *Lifecycler) updateCounters(ringDesc *Desc) {
 	i.healthyInstancesCount = healthyInstancesCount
 	i.zonesCount = len(zones)
 	i.zones = zones
+	i.ringTokensByZone = tokensByZone
 	i.countersLock.Unlock()
 }
 
