@@ -1,0 +1,98 @@
+# Partition Ring Configuration Example
+
+# Ingester configuration
+ingester:
+  # Standard ingester configuration
+  lifecycler:
+    ring:
+      kvstore:
+        store: consul
+        prefix: ingesters/
+      heartbeat_timeout: 1m
+      replication_factor: 3
+      zone_awareness_enabled: true
+    join_after: 0s
+    min_ready_duration: 1m
+    final_sleep: 0s
+    num_tokens: 128
+      
+  # TSDB configuration
+  blocks_storage:
+    tsdb:
+      dir: /data/cortex/tsdb
+      ship_interval: 1m
+      block_ranges_period: [ 2h ]
+      retention_period: 48h
+      head_compaction_interval: 1m
+      head_compaction_concurrency: 1
+      head_compaction_idle_timeout: 1h
+      stripe_size: 16384
+      wal_compression_enabled: true
+      flush_blocks_on_shutdown: true
+      close_idle_tsdb_timeout: 1h
+    bucket_store:
+      sync_dir: /data/cortex/tsdb-sync
+    s3:
+      endpoint: s3.amazonaws.com
+      bucket_name: cortex-tsdb
+      access_key_id: ${AWS_ACCESS_KEY_ID}
+      secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+      insecure: false
+  
+  # Partition ring configuration
+  partition_ring:
+    enabled: true
+    ring:
+      kvstore:
+        store: consul
+        prefix: partitions/
+      heartbeat_timeout: 1m
+      replication_factor: 3
+      zone_awareness_enabled: true
+    num_partitions: 16
+    partitions_per_ingester: 2
+    partition_selection_strategy: zone-aware
+        
+# Distributor configuration
+distributor:
+  # Standard distributor configuration
+  ring:
+    kvstore:
+      store: consul
+      prefix: ingesters/
+    heartbeat_timeout: 1m
+  
+  ha_tracker:
+    enable_ha_tracker: true
+    kvstore:
+      store: consul
+      prefix: ha-tracker/
+    replication_factor: 3
+    
+  health_check:
+    enabled: true
+    ring_check:
+      enabled: true
+      timeout: 10s
+  
+  # Partition ring configuration
+  partition_ring:
+    enabled: true
+    ring:
+      kvstore:
+        store: consul
+        prefix: partitions/
+      heartbeat_timeout: 1m
+      replication_factor: 3
+      zone_awareness_enabled: true
+    num_partitions: 16
+
+# Example of scaling down a partition
+# 1. Mark the partition as READONLY
+# curl -X POST http://localhost:8080/api/v1/partition/p-15/readonly
+#
+# 2. Wait for all ingesters in the partition to become empty
+# curl http://localhost:8080/api/v1/partition/p-15/status
+#
+# 3. Remove the partition
+# curl -X DELETE http://localhost:8080/api/v1/partition/p-15

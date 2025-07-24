@@ -198,6 +198,19 @@ func (c *Client) CAS(ctx context.Context, key string, f func(in interface{}) (ou
 		if len(putRequests) > 0 || len(deleteRequests) > 0 {
 			err = c.kv.Batch(ctx, putRequests, deleteRequests)
 			if err != nil {
+				// Log request counts and keys instead of raw byte data
+				putKeys := make([]string, 0, len(putRequests))
+				for k := range putRequests {
+					putKeys = append(putKeys, fmt.Sprintf("%s:%s", k.primaryKey, k.sortKey))
+				}
+				deleteKeys := make([]string, 0, len(deleteRequests))
+				for _, k := range deleteRequests {
+					deleteKeys = append(deleteKeys, fmt.Sprintf("%s:%s", k.primaryKey, k.sortKey))
+				}
+				level.Error(c.logger).Log("msg", "error Batch", "key", key,
+					"putCount", len(putRequests), "putKeys", putKeys,
+					"deleteCount", len(deleteRequests), "deleteKeys", deleteKeys,
+					"err", err)
 				return err
 			}
 			c.updateStaleData(key, r, time.Now().UTC())

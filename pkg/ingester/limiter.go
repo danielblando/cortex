@@ -7,6 +7,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/prometheus/model/labels"
 
+	"github.com/cortexproject/cortex/pkg/ring"
 	"github.com/cortexproject/cortex/pkg/util"
 	"github.com/cortexproject/cortex/pkg/util/validation"
 )
@@ -26,18 +27,11 @@ type errMaxSeriesPerLabelSetLimitExceeded struct {
 	globalLimit int
 }
 
-// RingCount is the interface exposed by a ring implementation which allows
-// to count members
-type RingCount interface {
-	HealthyInstancesCount() int
-	ZonesCount() int
-}
-
 // Limiter implements primitives to get the maximum number of series
 // an ingester can handle for a specific tenant
 type Limiter struct {
 	limits                 *validation.Overrides
-	ring                   RingCount
+	ring                   ring.RingCount
 	replicationFactor      int
 	shuffleShardingEnabled bool
 	shardByAllLabels       bool
@@ -48,7 +42,7 @@ type Limiter struct {
 // NewLimiter makes a new in-memory series limiter
 func NewLimiter(
 	limits *validation.Overrides,
-	ring RingCount,
+	ring ring.RingCount,
 	shardingStrategy string,
 	shardByAllLabels bool,
 	replicationFactor int,
