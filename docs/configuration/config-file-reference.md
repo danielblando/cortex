@@ -3318,6 +3318,14 @@ lifecycler:
     # CLI flag: -ring.detailed-metrics-enabled
     [detailed_metrics_enabled: <boolean> | default = true]
 
+    # Enable partition ring instead of standard ring.
+    # CLI flag: -ring.partition-ring-enabled
+    [partition_ring_enabled: <boolean> | default = false]
+
+    # Number of partitions in the partition ring.
+    # CLI flag: -ring.num-partitions
+    [num_partitions: <int> | default = 16]
+
   # Number of tokens for each ingester.
   # CLI flag: -ingester.num-tokens
   [num_tokens: <int> | default = 128]

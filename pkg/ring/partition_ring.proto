@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package ring;
+
+import "gogoproto/gogo.proto";
+import "ring.proto";
+
+option (gogoproto.marshaler_all) = true;
+option (gogoproto.unmarshaler_all) = true;
+
+
+message PartitionRingDesc {
+  map<string,PartitionDesc> partitions = 1;
+}
+
+
+message PartitionDesc {
+  PartitionState state = 1;
+  repeated uint32 tokens = 2;
+
+  map<string, InstanceDesc> instances = 3 [(gogoproto.nullable) = false];
+  int64 registered_timestamp = 4;
+  int64 timestamp = 5;
+}
+
+enum PartitionState {
+  P_ACTIVE = 0;
+  P_READONLY = 1;
+  P_NON_READY = 2;
+}

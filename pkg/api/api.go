@@ -386,7 +386,7 @@ func (a *API) RegisterRulerAPI(r *ruler.API) {
 }
 
 // RegisterRing registers the ring UI page associated with the distributor for writes.
-func (a *API) RegisterRing(r *ring.Ring) {
+func (a *API) RegisterRing(r ring.RingInterface) {
 	a.indexPage.AddLink(SectionAdminEndpoints, "/ingester/ring", "Ingester Ring Status")
 	a.RegisterRoute("/ingester/ring", r, false, "GET", "POST")
 

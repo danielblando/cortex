@@ -71,7 +71,8 @@ import (
 
 const (
 	// RingKey is the key under which we store the ingesters ring in the KVStore.
-	RingKey = "ring"
+	RingKey          = "ring"
+	PartitionRingKey = "partitionRing"
 )
 
 const (
@@ -239,7 +240,7 @@ type Ingester struct {
 
 	logger log.Logger
 
-	lifecycler           *ring.Lifecycler
+	lifecycler           ring.LifecyclerInterface
 	limits               *validation.Overrides
 	limiter              *Limiter
 	resourceBasedLimiter *limiter.ResourceBasedLimiter
@@ -773,9 +774,18 @@ func New(cfg Config, limits *validation.Overrides, registerer prometheus.Registe
 		}, i.getOldestUnshippedBlockMetric)
 	}
 
-	i.lifecycler, err = ring.NewLifecycler(cfg.LifecyclerConfig, i, "ingester", RingKey, false, cfg.BlocksStorageConfig.TSDB.FlushBlocksOnShutdown, logger, prometheus.WrapRegistererWithPrefix("cortex_", registerer))
-	if err != nil {
-		return nil, err
+	// Create the appropriate lifecycler based on configuration
+	if cfg.LifecyclerConfig.RingConfig.PartitionRingEnabled {
+		i.lifecycler, err = ring.NewPartitionLifecycler(cfg.LifecyclerConfig, i, "partition-ingester", PartitionRingKey, false, cfg.BlocksStorageConfig.TSDB.FlushBlocksOnShutdown, logger, prometheus.WrapRegistererWithPrefix("cortex_", registerer))
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Create regular lifecycler
+		i.lifecycler, err = ring.NewLifecycler(cfg.LifecyclerConfig, i, "ingester", RingKey, false, cfg.BlocksStorageConfig.TSDB.FlushBlocksOnShutdown, logger, prometheus.WrapRegistererWithPrefix("cortex_", registerer))
+		if err != nil {
+			return nil, err
+		}
 	}
 	i.subservicesWatcher = services.NewFailureWatcher()
 	i.subservicesWatcher.WatchService(i.lifecycler)
@@ -791,7 +801,7 @@ func New(cfg Config, limits *validation.Overrides, registerer prometheus.Registe
 		cfg.AdminLimitMessage,
 	)
 
-	i.TSDBState.shipperIngesterID = i.lifecycler.ID
+	i.TSDBState.shipperIngesterID = i.lifecycler.GetInstanceID()
 
 	// Apply positive jitter only to ensure that the minimum timeout is adhered to.
 	i.TSDBState.compactionIdleTimeout = util.DurationWithPositiveJitter(i.cfg.BlocksStorageConfig.TSDB.HeadCompactionIdleTimeout, compactionIdleTimeoutJitter)
@@ -2896,12 +2906,12 @@ func (i *Ingester) compactionLoop(ctx context.Context) error {
 		if i.cfg.LifecyclerConfig.RingConfig.ZoneAwarenessEnabled {
 			zones := i.lifecycler.Zones()
 			if len(zones) != 0 {
-				return slices.Index(zones, i.lifecycler.Zone), len(zones)
+				return slices.Index(zones, i.lifecycler.GetZone()), len(zones)
 			}
 		}
 
 		// Lets create the slot based on the hash id
-		i := int(client.HashAdd32(client.HashNew32(), i.lifecycler.ID) % 10)
+		i := int(client.HashAdd32(client.HashNew32(), i.lifecycler.GetInstanceID()) % 10)
 		return i, 10
 	}
 	ticker := util.NewSlottedTicker(infoFunc, i.cfg.BlocksStorageConfig.TSDB.HeadCompactionInterval, 1)

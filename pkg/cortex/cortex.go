@@ -311,7 +311,7 @@ type Cortex struct {
 
 	API                      *api.API
 	Server                   *server.Server
-	Ring                     *ring.Ring
+	Ring                     ring.RingInterface
 	TenantLimits             validation.TenantLimits
 	Overrides                *validation.Overrides
 	Distributor              *distributor.Distributor

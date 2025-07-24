@@ -147,9 +147,16 @@ func (t *Cortex) initServer() (services.Service, error) {
 
 func (t *Cortex) initRing() (serv services.Service, err error) {
 	t.Cfg.Ingester.LifecyclerConfig.RingConfig.KVStore.Multi.ConfigProvider = multiClientRuntimeConfigChannel(t.RuntimeConfig)
-	t.Ring, err = ring.New(t.Cfg.Ingester.LifecyclerConfig.RingConfig, "ingester", ingester.RingKey, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer))
-	if err != nil {
-		return nil, err
+
+	// Create the appropriate ring based on configuration
+	if t.Cfg.Ingester.LifecyclerConfig.RingConfig.PartitionRingEnabled {
+		t.Ring, err = ring.NewPartitionRing(t.Cfg.Ingester.LifecyclerConfig.RingConfig, "partition-ingester", ingester.PartitionRingKey, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer))
+	} else {
+		// Create regular ring
+		t.Ring, err = ring.New(t.Cfg.Ingester.LifecyclerConfig.RingConfig, "ingester", ingester.RingKey, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	t.API.RegisterRing(t.Ring)
