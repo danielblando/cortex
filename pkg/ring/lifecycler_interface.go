@@ -57,6 +57,9 @@ type LifecyclerInterface interface {
 	CheckReady(ctx context.Context) error
 
 	Zones() []string
+
+	// RecoverFromLeavingState attempts to recover an instance stuck in LEAVING state
+	RecoverFromLeavingState() error
 }
 
 type LifecyclerConfig struct {

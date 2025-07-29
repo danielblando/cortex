@@ -240,7 +240,8 @@ type Ingester struct {
 
 	logger log.Logger
 
-	lifecycler           ring.LifecyclerInterface
+	lifecyclers          []ring.LifecyclerInterface
+	primaryLifecycler    ring.LifecyclerInterface // Primary lifecycler for backward compatibility
 	limits               *validation.Overrides
 	limiter              *Limiter
 	resourceBasedLimiter *limiter.ResourceBasedLimiter
@@ -774,26 +775,20 @@ func New(cfg Config, limits *validation.Overrides, registerer prometheus.Registe
 		}, i.getOldestUnshippedBlockMetric)
 	}
 
-	// Create the appropriate lifecycler based on configuration
-	if cfg.LifecyclerConfig.RingConfig.PartitionRingEnabled {
-		i.lifecycler, err = ring.NewPartitionLifecycler(cfg.LifecyclerConfig, i, "partition-ingester", PartitionRingKey, false, cfg.BlocksStorageConfig.TSDB.FlushBlocksOnShutdown, logger, prometheus.WrapRegistererWithPrefix("cortex_", registerer))
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// Create regular lifecycler
-		i.lifecycler, err = ring.NewLifecycler(cfg.LifecyclerConfig, i, "ingester", RingKey, false, cfg.BlocksStorageConfig.TSDB.FlushBlocksOnShutdown, logger, prometheus.WrapRegistererWithPrefix("cortex_", registerer))
-		if err != nil {
-			return nil, err
-		}
+	// Create lifecyclers based on configuration
+	err = i.createLifecyclers(cfg, logger, registerer)
+	if err != nil {
+		return nil, err
 	}
 	i.subservicesWatcher = services.NewFailureWatcher()
-	i.subservicesWatcher.WatchService(i.lifecycler)
+	for _, lifecycler := range i.lifecyclers {
+		i.subservicesWatcher.WatchService(lifecycler)
+	}
 
 	// Init the limter and instantiate the user states which depend on it
 	i.limiter = NewLimiter(
 		limits,
-		i.lifecycler,
+		i.primaryLifecycler,
 		cfg.DistributorShardingStrategy,
 		cfg.DistributorShardByAllLabels,
 		cfg.LifecyclerConfig.RingConfig.ReplicationFactor,
@@ -801,7 +796,7 @@ func New(cfg Config, limits *validation.Overrides, registerer prometheus.Registe
 		cfg.AdminLimitMessage,
 	)
 
-	i.TSDBState.shipperIngesterID = i.lifecycler.GetInstanceID()
+	i.TSDBState.shipperIngesterID = i.primaryLifecycler.GetInstanceID()
 
 	// Apply positive jitter only to ensure that the minimum timeout is adhered to.
 	i.TSDBState.compactionIdleTimeout = util.DurationWithPositiveJitter(i.cfg.BlocksStorageConfig.TSDB.HeadCompactionIdleTimeout, compactionIdleTimeoutJitter)
@@ -825,6 +820,115 @@ func New(cfg Config, limits *validation.Overrides, registerer prometheus.Registe
 	return i, nil
 }
 
+// createLifecyclers creates the appropriate lifecyclers based on configuration
+func (i *Ingester) createLifecyclers(cfg Config, logger log.Logger, registerer prometheus.Registerer) error {
+	ringCfg := cfg.LifecyclerConfig.RingConfig
+
+	// Check if multi-ring is enabled
+	if ringCfg.MultiRing.Enabled {
+		// Create both primary and secondary lifecyclers
+		primaryLifecycler, err := i.createLifecyclerForRingType(cfg, ringCfg.MultiRing.PrimaryRingType, logger, registerer)
+		if err != nil {
+			return fmt.Errorf("failed to create primary lifecycler: %w", err)
+		}
+
+		secondaryLifecycler, err := i.createLifecyclerForRingType(cfg, ringCfg.MultiRing.SecondaryRingType, logger, registerer)
+		if err != nil {
+			return fmt.Errorf("failed to create secondary lifecycler: %w", err)
+		}
+
+		i.lifecyclers = []ring.LifecyclerInterface{primaryLifecycler, secondaryLifecycler}
+		i.primaryLifecycler = primaryLifecycler
+
+		level.Info(logger).Log("msg", "created multi-ring lifecyclers", "primary_type", ringCfg.MultiRing.PrimaryRingType, "secondary_type", ringCfg.MultiRing.SecondaryRingType)
+	} else {
+		// Create single lifecycler based on configuration
+		var ringType string
+		if ringCfg.PartitionRingEnabled {
+			ringType = "partition"
+		} else {
+			ringType = "default"
+		}
+
+		lifecycler, err := i.createLifecyclerForRingType(cfg, ringType, logger, registerer)
+		if err != nil {
+			return fmt.Errorf("failed to create lifecycler: %w", err)
+		}
+
+		i.lifecyclers = []ring.LifecyclerInterface{lifecycler}
+		i.primaryLifecycler = lifecycler
+
+		level.Info(logger).Log("msg", "created single lifecycler", "ring_type", ringType)
+	}
+
+	return nil
+}
+
+// createLifecyclerForRingType creates a lifecycler for the specified ring type
+func (i *Ingester) createLifecyclerForRingType(cfg Config, ringType string, logger log.Logger, registerer prometheus.Registerer) (ring.LifecyclerInterface, error) {
+	switch ringType {
+	case "partition":
+		return ring.NewPartitionLifecycler(cfg.LifecyclerConfig, i, "partition-ingester", PartitionRingKey, false, cfg.BlocksStorageConfig.TSDB.FlushBlocksOnShutdown, logger, prometheus.WrapRegistererWithPrefix("cortex_", registerer))
+	case "default":
+		return ring.NewLifecycler(cfg.LifecyclerConfig, i, "ingester", RingKey, false, cfg.BlocksStorageConfig.TSDB.FlushBlocksOnShutdown, logger, prometheus.WrapRegistererWithPrefix("cortex_", registerer))
+	default:
+		return nil, fmt.Errorf("unknown ring type: %s", ringType)
+	}
+}
+
+// Helper methods for managing multiple lifecyclers
+
+// startAllLifecyclers starts all lifecyclers
+func (i *Ingester) startAllLifecyclers(ctx context.Context) error {
+	for idx, lifecycler := range i.lifecyclers {
+		if err := lifecycler.StartAsync(context.Background()); err != nil {
+			return fmt.Errorf("failed to start lifecycler %d: %w", idx, err)
+		}
+		if err := lifecycler.AwaitRunning(ctx); err != nil {
+			return fmt.Errorf("failed to await lifecycler %d running: %w", idx, err)
+		}
+	}
+	return nil
+}
+
+// joinAllLifecyclers calls Join on all lifecyclers
+func (i *Ingester) joinAllLifecyclers() {
+	for _, lifecycler := range i.lifecyclers {
+		lifecycler.Join()
+	}
+}
+
+// renewTokensAllLifecyclers calls RenewTokens on all lifecyclers
+func (i *Ingester) renewTokensAllLifecyclers(factor float64, ctx context.Context) {
+	for _, lifecycler := range i.lifecyclers {
+		lifecycler.RenewTokens(factor, ctx)
+	}
+}
+
+// setFlushOnShutdownAllLifecyclers sets FlushOnShutdown on all lifecyclers
+func (i *Ingester) setFlushOnShutdownAllLifecyclers(flush bool) {
+	for _, lifecycler := range i.lifecyclers {
+		lifecycler.SetFlushOnShutdown(flush)
+	}
+}
+
+// setUnregisterOnShutdownAllLifecyclers sets UnregisterOnShutdown on all lifecyclers
+func (i *Ingester) setUnregisterOnShutdownAllLifecyclers(unregister bool) {
+	for _, lifecycler := range i.lifecyclers {
+		lifecycler.SetUnregisterOnShutdown(unregister)
+	}
+}
+
+// changeStateAllLifecyclers changes state on all lifecyclers
+func (i *Ingester) changeStateAllLifecyclers(ctx context.Context, state ring.InstanceState) error {
+	for idx, lifecycler := range i.lifecyclers {
+		if err := lifecycler.ChangeState(ctx, state); err != nil {
+			return fmt.Errorf("failed to change state for lifecycler %d: %w", idx, err)
+		}
+	}
+	return nil
+}
+
 // NewForFlusher constructs a new Ingester to be used by flusher target.
 // Compared to the 'New' method:
 //   - Always replays the WAL.
@@ -846,7 +950,7 @@ func NewForFlusher(cfg Config, limits *validation.Overrides, registerer promethe
 	}
 	i.limiter = NewLimiter(
 		limits,
-		i.lifecycler,
+		i.primaryLifecycler,
 		cfg.DistributorShardingStrategy,
 		cfg.DistributorShardByAllLabels,
 		cfg.LifecyclerConfig.RingConfig.ReplicationFactor,
@@ -884,12 +988,9 @@ func (i *Ingester) startingV2ForFlusher(ctx context.Context) error {
 }
 
 func (i *Ingester) starting(ctx context.Context) error {
-	// Important: we want to keep lifecycler running until we ask it to stop, so we need to give it independent context
-	if err := i.lifecycler.StartAsync(context.Background()); err != nil {
-		return errors.Wrap(err, "failed to start lifecycler")
-	}
-	if err := i.lifecycler.AwaitRunning(ctx); err != nil {
-		return errors.Wrap(err, "failed to start lifecycler")
+	// Important: we want to keep lifecyclers running until we ask them to stop, so we need to give them independent context
+	if err := i.startAllLifecyclers(ctx); err != nil {
+		return errors.Wrap(err, "failed to start lifecyclers")
 	}
 
 	if err := i.openExistingTSDB(ctx); err != nil {
@@ -899,7 +1000,10 @@ func (i *Ingester) starting(ctx context.Context) error {
 		return errors.Wrap(err, "opening existing TSDBs")
 	}
 
-	i.lifecycler.Join()
+	i.joinAllLifecyclers()
+
+	// Attempt to recover any lifecyclers stuck in LEAVING state
+	i.recoverLeavingLifecyclers()
 
 	// let's start the rest of subservices via manager
 	servs := []services.Service(nil)
@@ -955,9 +1059,11 @@ func (i *Ingester) stopping(_ error) error {
 		level.Warn(i.logger).Log("msg", "failed to stop ingester subservices", "err", err)
 	}
 
-	// Next initiate our graceful exit from the ring.
-	if err := services.StopAndAwaitTerminated(context.Background(), i.lifecycler); err != nil {
-		level.Warn(i.logger).Log("msg", "failed to stop ingester lifecycler", "err", err)
+	// Next initiate our graceful exit from the ring(s).
+	for idx, lifecycler := range i.lifecyclers {
+		if err := services.StopAndAwaitTerminated(context.Background(), lifecycler); err != nil {
+			level.Warn(i.logger).Log("msg", "failed to stop ingester lifecycler", "err", err, "lifecycler_index", idx)
+		}
 	}
 
 	if !i.cfg.BlocksStorageConfig.TSDB.KeepUserTSDBOpenOnShutdown {
@@ -1106,7 +1212,7 @@ func (i *Ingester) updateLabelSetMetrics() {
 }
 
 func (i *Ingester) RenewTokenHandler(w http.ResponseWriter, r *http.Request) {
-	i.lifecycler.RenewTokens(0.1, r.Context())
+	i.renewTokensAllLifecyclers(0.1, r.Context())
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1114,18 +1220,21 @@ func (i *Ingester) RenewTokenHandler(w http.ResponseWriter, r *http.Request) {
 //   - Change the state of ring to stop accepting writes.
 //   - Flush all the chunks.
 func (i *Ingester) ShutdownHandler(w http.ResponseWriter, _ *http.Request) {
-	originalFlush := i.lifecycler.FlushOnShutdown()
+	// Store original settings for all lifecyclers (use primary as representative)
+	originalFlush := i.primaryLifecycler.FlushOnShutdown()
+	originalUnregister := i.primaryLifecycler.ShouldUnregisterOnShutdown()
+
 	// We want to flush the chunks if transfer fails irrespective of original flag.
-	i.lifecycler.SetFlushOnShutdown(true)
+	i.setFlushOnShutdownAllLifecyclers(true)
 
 	// In the case of an HTTP shutdown, we want to unregister no matter what.
-	originalUnregister := i.lifecycler.ShouldUnregisterOnShutdown()
-	i.lifecycler.SetUnregisterOnShutdown(true)
+	i.setUnregisterOnShutdownAllLifecyclers(true)
 
 	_ = services.StopAndAwaitTerminated(context.Background(), i)
-	// Set state back to original.
-	i.lifecycler.SetFlushOnShutdown(originalFlush)
-	i.lifecycler.SetUnregisterOnShutdown(originalUnregister)
+
+	// Set state back to original for all lifecyclers.
+	i.setFlushOnShutdownAllLifecyclers(originalFlush)
+	i.setUnregisterOnShutdownAllLifecyclers(originalUnregister)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -2098,7 +2207,7 @@ func (i *Ingester) CheckReady(ctx context.Context) error {
 	if err := i.checkRunningOrStopping(); err != nil {
 		return fmt.Errorf("ingester not ready: %v", err)
 	}
-	return i.lifecycler.CheckReady(ctx)
+	return i.primaryLifecycler.CheckReady(ctx)
 }
 
 // UserStats returns ingestion statistics for the current user.
@@ -2446,7 +2555,7 @@ func (i *Ingester) getOrCreateTSDB(userID string, force bool) (*userTSDB, error)
 	// to a non-ACTIVE ingester, however we want to protect from any bug, cause we
 	// may have data loss or TSDB WAL corruption if the TSDB is created before/during
 	// a transfer in occurs.
-	if ingesterState := i.lifecycler.GetState(); !force && ingesterState != ring.ACTIVE {
+	if ingesterState := i.primaryLifecycler.GetState(); !force && ingesterState != ring.ACTIVE {
 		return nil, fmt.Errorf(errTSDBCreateIncompatibleState, ingesterState)
 	}
 
@@ -2822,8 +2931,8 @@ func (i *Ingester) shipBlocks(ctx context.Context, allowed *util.AllowedTenants)
 	// particularly important for the JOINING state because there could
 	// be a blocks transfer in progress (from another ingester) and if we
 	// run the shipper in such state we could end up with race conditions.
-	if i.lifecycler != nil {
-		if ingesterState := i.lifecycler.GetState(); ingesterState == ring.PENDING || ingesterState == ring.JOINING {
+	if i.primaryLifecycler != nil {
+		if ingesterState := i.primaryLifecycler.GetState(); ingesterState == ring.PENDING || ingesterState == ring.JOINING {
 			level.Info(logutil.WithContext(ctx, i.logger)).Log("msg", "TSDB blocks shipping has been skipped because of the current ingester state", "state", ingesterState)
 			return
 		}
@@ -2904,14 +3013,14 @@ func (i *Ingester) shipBlocks(ctx context.Context, allowed *util.AllowedTenants)
 func (i *Ingester) compactionLoop(ctx context.Context) error {
 	infoFunc := func() (int, int) {
 		if i.cfg.LifecyclerConfig.RingConfig.ZoneAwarenessEnabled {
-			zones := i.lifecycler.Zones()
+			zones := i.primaryLifecycler.Zones()
 			if len(zones) != 0 {
-				return slices.Index(zones, i.lifecycler.GetZone()), len(zones)
+				return slices.Index(zones, i.primaryLifecycler.GetZone()), len(zones)
 			}
 		}
 
 		// Lets create the slot based on the hash id
-		i := int(client.HashAdd32(client.HashNew32(), i.lifecycler.GetInstanceID()) % 10)
+		i := int(client.HashAdd32(client.HashNew32(), i.primaryLifecycler.GetInstanceID()) % 10)
 		return i, 10
 	}
 	ticker := util.NewSlottedTicker(infoFunc, i.cfg.BlocksStorageConfig.TSDB.HeadCompactionInterval, 1)
@@ -2937,8 +3046,8 @@ func (i *Ingester) compactionLoop(ctx context.Context) error {
 func (i *Ingester) compactBlocks(ctx context.Context, force bool, allowed *util.AllowedTenants) {
 	// Don't compact TSDB blocks while JOINING as there may be ongoing blocks transfers.
 	// Compaction loop is not running in LEAVING state, so if we get here in LEAVING state, we're flushing blocks.
-	if i.lifecycler != nil {
-		if ingesterState := i.lifecycler.GetState(); ingesterState == ring.JOINING {
+	if i.primaryLifecycler != nil {
+		if ingesterState := i.primaryLifecycler.GetState(); ingesterState == ring.JOINING {
 			level.Info(logutil.WithContext(ctx, i.logger)).Log("msg", "TSDB blocks compaction has been skipped because of the current ingester state", "state", ingesterState)
 			return
 		}
@@ -3320,12 +3429,12 @@ func (i *Ingester) ModeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	currentState := i.lifecycler.GetState()
+	currentState := i.primaryLifecycler.GetState()
 	reqMode := strings.ToUpper(r.Form.Get("mode"))
 	switch reqMode {
 	case "READONLY":
 		if currentState != ring.READONLY {
-			err = i.lifecycler.ChangeState(r.Context(), ring.READONLY)
+			err = i.changeStateAllLifecyclers(r.Context(), ring.READONLY)
 			if err != nil {
 				respMsg := fmt.Sprintf("failed to change state: %s", err)
 				level.Warn(logutil.WithContext(r.Context(), i.logger)).Log("msg", respMsg)
@@ -3337,7 +3446,7 @@ func (i *Ingester) ModeHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	case "ACTIVE":
 		if currentState != ring.ACTIVE {
-			err = i.lifecycler.ChangeState(r.Context(), ring.ACTIVE)
+			err = i.changeStateAllLifecyclers(r.Context(), ring.ACTIVE)
 			if err != nil {
 				respMsg := fmt.Sprintf("failed to change state: %s", err)
 				level.Warn(logutil.WithContext(r.Context(), i.logger)).Log("msg", respMsg)
@@ -3356,7 +3465,7 @@ func (i *Ingester) ModeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respMsg := fmt.Sprintf("Ingester mode %s", i.lifecycler.GetState())
+	respMsg := fmt.Sprintf("Ingester mode %s", i.primaryLifecycler.GetState())
 	level.Info(logutil.WithContext(r.Context(), i.logger)).Log("msg", respMsg)
 	w.WriteHeader(http.StatusOK)
 	// We ignore errors here, because we cannot do anything about them.
@@ -3501,5 +3610,16 @@ func recoverIngester(logger log.Logger, errp *error) {
 
 		level.Error(logger).Log("msg", "runtime panic in ingester", "err", err, "stacktrace", string(buf))
 		*errp = errors.Wrap(err, "unexpected error")
+	}
+}
+
+// recoverLeavingLifecyclers attempts to recover any lifecyclers stuck in LEAVING state
+func (i *Ingester) recoverLeavingLifecyclers() {
+	for name, lifecycler := range i.lifecyclers {
+		if err := lifecycler.RecoverFromLeavingState(); err != nil {
+			level.Debug(i.logger).Log("msg", "lifecycler not in LEAVING state or recovery failed", "lifecycler", name, "err", err)
+		} else {
+			level.Info(i.logger).Log("msg", "recovered lifecycler from LEAVING state", "lifecycler", name)
+		}
 	}
 }

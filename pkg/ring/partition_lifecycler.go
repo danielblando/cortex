@@ -208,9 +208,10 @@ func (i *PartitionLifecycler) loop(ctx context.Context) error {
 			joined = true
 			level.Debug(i.logger).Log("msg", "JoinAfter expired", "ring", i.RingName)
 			// Will only fire once, after auto join timeout.  If we haven't entered "JOINING" state,
-			// then pick some tokens and enter ACTIVE state.
-			if i.GetInstanceState() == PENDING {
-				level.Info(i.logger).Log("msg", "auto-joining cluster after timeout", "ring", i.RingName)
+			// then pick some tokens and enter ACTIVE state. Also handle LEAVING state for recovery.
+			currentState := i.GetInstanceState()
+			if currentState == PENDING || currentState == LEAVING {
+				level.Info(i.logger).Log("msg", "auto-joining cluster after timeout", "current_state", currentState, "ring", i.RingName)
 
 				if i.cfg.ObservePeriod > 0 {
 					// let's observe the ring. By using JOINING state, this ingester will be ignored by LEAVING
@@ -222,8 +223,14 @@ func (i *PartitionLifecycler) loop(ctx context.Context) error {
 					level.Info(i.logger).Log("msg", "observing tokens before going ACTIVE", "ring", i.RingName)
 					observeChan = time.After(i.cfg.ObservePeriod)
 				} else {
-					if err := i.autoJoin(context.Background(), i.getInstancePreviousState(), addedInRing); err != nil {
-						return errors.Wrapf(err, "failed to pick tokens in the KV store, ring: %s, state: %s", i.RingName, i.getInstancePreviousState())
+					// Determine target state: if previous state was LEAVING, go to ACTIVE
+					targetState := i.getInstancePreviousState()
+					if targetState == LEAVING {
+						targetState = ACTIVE
+						level.Info(i.logger).Log("msg", "previous state was LEAVING, transitioning to ACTIVE", "ring", i.RingName)
+					}
+					if err := i.autoJoin(context.Background(), targetState, addedInRing); err != nil {
+						return errors.Wrapf(err, "failed to pick tokens in the KV store, ring: %s, state: %s", i.RingName, targetState)
 					}
 				}
 
@@ -244,9 +251,15 @@ func (i *PartitionLifecycler) loop(ctx context.Context) error {
 			if i.verifyTokens(context.Background()) {
 				level.Info(i.logger).Log("msg", "token verification successful", "ring", i.RingName)
 
-				err := i.ChangeState(context.Background(), i.getInstancePreviousState())
+				// Determine target state: if previous state was LEAVING, go to ACTIVE
+				targetState := i.getInstancePreviousState()
+				if targetState == LEAVING {
+					targetState = ACTIVE
+					level.Info(i.logger).Log("msg", "previous state was LEAVING, transitioning to ACTIVE after token verification", "ring", i.RingName)
+				}
+				err := i.ChangeState(context.Background(), targetState)
 				if err != nil {
-					level.Error(i.logger).Log("msg", "failed to set state", "ring", i.RingName, "state", i.getInstancePreviousState(), "err", err)
+					level.Error(i.logger).Log("msg", "failed to set state", "ring", i.RingName, "state", targetState, "err", err)
 				}
 
 				if !addedInRing {
@@ -358,12 +371,15 @@ func (i *PartitionLifecycler) initRing(ctx context.Context) (bool, error) {
 		// If the ingester failed to clean its ring entry up in can leave its state in LEAVING
 		// OR unregister_on_shutdown=false
 		// if autoJoinOnStartup, move it into previous state based on token file (default: ACTIVE)
-		// to ensure the ingester joins the ring. else set to PENDING
+		// to ensure the ingester joins the ring. else set to ACTIVE if it has tokens (clean restart)
 		if instanceDesc.State == LEAVING && len(instanceDesc.Tokens) != 0 {
 			if i.autoJoinOnStartup {
 				instanceDesc.State = i.getInstancePreviousState()
 			} else {
-				instanceDesc.State = PENDING
+				// If the instance was cleanly shutdown (LEAVING state) and has tokens,
+				// it should go back to ACTIVE rather than PENDING to avoid getting stuck
+				instanceDesc.State = ACTIVE
+				level.Info(i.logger).Log("msg", "instance found in LEAVING state with tokens, transitioning to ACTIVE", "ring", i.RingName)
 			}
 		}
 
@@ -711,7 +727,7 @@ func (i *PartitionLifecycler) loadTokenFile() (*TokenFile, error) {
 // ChangeState updates consul with state transitions for us.  NB this must be
 // called from loop()!  Use ChangeState for calls from outside of loop().
 func (i *PartitionLifecycler) ChangeState(ctx context.Context, state InstanceState) error {
-	currState := i.getInstancePreviousState()
+	currState := i.GetInstanceState()
 	// Only the following state transitions can be triggered externally
 	//nolint:staticcheck
 	if !((currState == PENDING && state == JOINING) ||
@@ -723,7 +739,10 @@ func (i *PartitionLifecycler) ChangeState(ctx context.Context, state InstanceSta
 		(currState == ACTIVE && state == LEAVING) || // triggered by shutdown
 		(currState == ACTIVE && state == READONLY) || // triggered by ingester mode
 		(currState == READONLY && state == ACTIVE) || // triggered by ingester mode
-		(currState == READONLY && state == LEAVING)) { // triggered by shutdown
+		(currState == READONLY && state == LEAVING) || // triggered by shutdown
+		(currState == LEAVING && state == ACTIVE) || // triggered by restart after clean shutdown
+		(currState == LEAVING && state == PENDING) || // triggered by restart recovery
+		(currState == LEAVING && state == JOINING)) { // triggered by recovery for stuck instances
 		return fmt.Errorf("changing instance state from %v -> %v is disallowed", currState, state)
 	}
 
@@ -1114,4 +1133,23 @@ func AutoSelectPartition(instanceID string) (string, error) {
 
 	// Return the partition ID
 	return fmt.Sprintf("p-%d", partitionNum), nil
+}
+
+// RecoverFromLeavingState attempts to recover an instance that is stuck in LEAVING state
+// This is useful for operational recovery of instances that failed to complete shutdown properly
+func (i *PartitionLifecycler) RecoverFromLeavingState() error {
+	currentState := i.GetInstanceState()
+	if currentState != LEAVING {
+		return fmt.Errorf("instance is not in LEAVING state, current state: %s", currentState)
+	}
+
+	level.Info(i.logger).Log("msg", "attempting to recover from LEAVING state", "ring", i.RingName)
+
+	// Try to transition directly to ACTIVE if we have tokens
+	if len(i.getTokens()) > 0 {
+		return i.ChangeState(context.Background(), ACTIVE)
+	}
+
+	// If no tokens, go through JOINING state
+	return i.ChangeState(context.Background(), JOINING)
 }

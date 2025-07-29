@@ -97,6 +97,9 @@ type Config struct {
 	// Whether the shuffle-sharding subring cache is disabled. This option is set
 	// internally and never exposed to the user.
 	SubringCacheDisabled bool `yaml:"-"`
+
+	// Multi-ring migration configuration
+	MultiRing MultiRingConfig `yaml:"multi_ring"`
 }
 
 // RegisterFlags adds the flags required to config this to the given FlagSet with a specified prefix
@@ -117,4 +120,12 @@ func (cfg *Config) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
 	// Partition ring configuration
 	f.BoolVar(&cfg.PartitionRingEnabled, prefix+"ring.partition-ring-enabled", false, "Enable partition ring instead of standard ring.")
 	f.IntVar(&cfg.NumPartitions, prefix+"ring.num-partitions", 16, "Number of partitions in the partition ring.")
+
+	// Multi-ring migration configuration
+	cfg.MultiRing.RegisterFlagsWithPrefix(prefix+"ring.", f)
+}
+
+// Validate validates the ring configuration
+func (cfg *Config) Validate() error {
+	return cfg.MultiRing.Validate()
 }

@@ -1086,3 +1086,22 @@ func (i *Lifecycler) IsRegistered() (bool, error) {
 func (i *Lifecycler) GetZone() string {
 	return i.Zone
 }
+
+// RecoverFromLeavingState attempts to recover an instance that is stuck in LEAVING state
+// This is useful for operational recovery of instances that failed to complete shutdown properly
+func (i *Lifecycler) RecoverFromLeavingState() error {
+	currentState := i.GetState()
+	if currentState != LEAVING {
+		return fmt.Errorf("instance is not in LEAVING state, current state: %s", currentState)
+	}
+
+	level.Info(i.logger).Log("msg", "attempting to recover from LEAVING state", "ring", i.RingName)
+
+	// Try to transition directly to ACTIVE if we have tokens
+	if len(i.getTokens()) > 0 {
+		return i.ChangeState(context.Background(), ACTIVE)
+	}
+
+	// If no tokens, go through JOINING state
+	return i.ChangeState(context.Background(), JOINING)
+}

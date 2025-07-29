@@ -392,6 +392,12 @@ func (a *API) RegisterRing(r ring.RingInterface) {
 
 	// Legacy Route
 	a.RegisterRoute("/ring", r, false, "GET", "POST")
+
+	// If it's a multi-ring, register sub-routes for individual rings
+	if multiRing, ok := r.(*ring.MultiRing); ok {
+		a.RegisterRoute("/ingester/ring/primary", multiRing.GetPrimaryRing(), false, "GET", "POST")
+		a.RegisterRoute("/ingester/ring/secondary", multiRing.GetSecondaryRing(), false, "GET", "POST")
+	}
 }
 
 // RegisterStoreGateway registers the ring UI page associated with the store-gateway.

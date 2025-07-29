@@ -148,20 +148,68 @@ func (t *Cortex) initServer() (services.Service, error) {
 func (t *Cortex) initRing() (serv services.Service, err error) {
 	t.Cfg.Ingester.LifecyclerConfig.RingConfig.KVStore.Multi.ConfigProvider = multiClientRuntimeConfigChannel(t.RuntimeConfig)
 
-	// Create the appropriate ring based on configuration
-	if t.Cfg.Ingester.LifecyclerConfig.RingConfig.PartitionRingEnabled {
-		t.Ring, err = ring.NewPartitionRing(t.Cfg.Ingester.LifecyclerConfig.RingConfig, "partition-ingester", ingester.PartitionRingKey, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer))
+	ringCfg := t.Cfg.Ingester.LifecyclerConfig.RingConfig
+
+	// Check if multi-ring is enabled
+	if ringCfg.MultiRing.Enabled {
+		// Create primary ring
+		var primaryRing ring.RingInterface
+		if ringCfg.MultiRing.PrimaryRingType == "partition" {
+			primaryRing, err = ring.NewPartitionRing(ringCfg, "partition-ingester", ingester.PartitionRingKey, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer))
+		} else {
+			primaryRing, err = ring.New(ringCfg, "ingester", ingester.RingKey, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer))
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to create primary ring: %w", err)
+		}
+
+		// Create secondary ring
+		var secondaryRing ring.RingInterface
+		if ringCfg.MultiRing.SecondaryRingType == "partition" {
+			secondaryRing, err = ring.NewPartitionRing(ringCfg, "partition-ingester", ingester.PartitionRingKey, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer))
+		} else {
+			secondaryRing, err = ring.New(ringCfg, "ingester", ingester.RingKey, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer))
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to create secondary ring: %w", err)
+		}
+
+		// Create multi-ring
+		multiRing, err := ring.NewMultiRing(ringCfg.MultiRing, primaryRing, secondaryRing, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create multi-ring: %w", err)
+		}
+
+		t.Ring = multiRing
+		level.Info(util_log.Logger).Log("msg", "multi-ring created", "primary_type", ringCfg.MultiRing.PrimaryRingType, "secondary_type", ringCfg.MultiRing.SecondaryRingType, "primary_percentage", ringCfg.MultiRing.PrimaryRingPercentage)
+
+		t.API.RegisterRing(t.Ring)
+		return multiRing, nil
 	} else {
-		// Create regular ring
-		t.Ring, err = ring.New(t.Cfg.Ingester.LifecyclerConfig.RingConfig, "ingester", ingester.RingKey, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer))
+		// Create single ring based on configuration
+		var ringType string
+		var ringName string
+		var ringKey string
+
+		if ringCfg.PartitionRingEnabled {
+			ringType = "partition"
+			ringName = "partition-ingester"
+			ringKey = ingester.PartitionRingKey
+		} else {
+			ringType = "default"
+			ringName = "ingester"
+			ringKey = ingester.RingKey
+		}
+
+		// Create the ring
+		t.Ring, err = ring.CreateRingFromConfig(ringCfg, ringType, ringName, ringKey, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", prometheus.DefaultRegisterer))
 		if err != nil {
 			return nil, err
 		}
+
+		t.API.RegisterRing(t.Ring)
+		return t.Ring, nil
 	}
-
-	t.API.RegisterRing(t.Ring)
-
-	return t.Ring, nil
 }
 
 func (t *Cortex) initRuntimeConfig() (services.Service, error) {
