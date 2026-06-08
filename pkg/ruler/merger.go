@@ -13,48 +13,76 @@ import (
 // It also truncates rule groups if maxRuleGroups > 0
 func mergeGroupStateDesc(ruleResponses []*RulesResponse, maxRuleGroups int32, dedup bool) *RulesResponse {
 
-	var groupsStateDescs []*GroupStateDesc
-
+	// Pre-calculate total group count to avoid repeated slice growth.
+	totalGroups := 0
 	for _, resp := range ruleResponses {
-		groupsStateDescs = append(groupsStateDescs, resp.Groups...)
+		totalGroups += len(resp.Groups)
 	}
 
-	states := make(map[string]*GroupStateDesc)
-	rgTime := make(map[string]time.Time)
-	groups := make([]*GroupStateDesc, 0)
-	if dedup {
-		for _, state := range groupsStateDescs {
+	if !dedup {
+		groups := make([]*GroupStateDesc, 0, totalGroups)
+		for _, resp := range ruleResponses {
+			groups = append(groups, resp.Groups...)
+		}
+		if maxRuleGroups > 0 {
+			sort.Sort(PaginatedGroupStates(groups))
+			result, nextToken := generatePage(groups, int(maxRuleGroups))
+			return &RulesResponse{Groups: result, NextToken: nextToken}
+		}
+		return &RulesResponse{Groups: groups, NextToken: ""}
+	}
+
+	// Dedup path: keep the GroupStateDesc with the latest evaluation timestamp.
+	// Use the group-level EvaluationTimestamp first (O(1) per group), and only
+	// scan individual rules if two groups have identical group-level timestamps.
+	states := make(map[string]*GroupStateDesc, totalGroups/2)
+	rgTime := make(map[string]time.Time, totalGroups/2)
+
+	for _, resp := range ruleResponses {
+		for _, state := range resp.Groups {
 			latestTs := state.EvaluationTimestamp
-			for _, r := range state.ActiveRules {
-				if latestTs.Before(r.EvaluationTimestamp) {
-					latestTs = r.EvaluationTimestamp
-				}
-			}
 			key := promRules.GroupKey(state.Group.Namespace, state.Group.Name)
 			ts, ok := rgTime[key]
-			if !ok || ts.Before(latestTs) {
+			if !ok {
 				states[key] = state
 				rgTime[key] = latestTs
+				continue
+			}
+			if ts.Before(latestTs) {
+				states[key] = state
+				rgTime[key] = latestTs
+			} else if ts.Equal(latestTs) {
+				// Only scan rules when group-level timestamps are identical.
+				existingMax := findMaxRuleTimestamp(states[key])
+				newMax := findMaxRuleTimestamp(state)
+				if newMax.After(existingMax) {
+					states[key] = state
+					rgTime[key] = newMax
+				}
 			}
 		}
-		for _, state := range states {
-			groups = append(groups, state)
-		}
-	} else {
-		groups = groupsStateDescs
+	}
+
+	groups := make([]*GroupStateDesc, 0, len(states))
+	for _, state := range states {
+		groups = append(groups, state)
 	}
 
 	if maxRuleGroups > 0 {
-		//Need to sort here before we truncate
 		sort.Sort(PaginatedGroupStates(groups))
 		result, nextToken := generatePage(groups, int(maxRuleGroups))
-		return &RulesResponse{
-			Groups:    result,
-			NextToken: nextToken,
+		return &RulesResponse{Groups: result, NextToken: nextToken}
+	}
+	return &RulesResponse{Groups: groups, NextToken: ""}
+}
+
+// findMaxRuleTimestamp finds the latest EvaluationTimestamp among a group's active rules.
+func findMaxRuleTimestamp(state *GroupStateDesc) time.Time {
+	maxTs := state.EvaluationTimestamp
+	for _, r := range state.ActiveRules {
+		if r.EvaluationTimestamp.After(maxTs) {
+			maxTs = r.EvaluationTimestamp
 		}
 	}
-	return &RulesResponse{
-		Groups:    groups,
-		NextToken: "",
-	}
+	return maxTs
 }
