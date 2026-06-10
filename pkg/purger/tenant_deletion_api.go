@@ -19,10 +19,14 @@ import (
 	"github.com/cortexproject/cortex/pkg/util/users"
 )
 
+// errBlockFound is used as a sentinel to stop Iter early when a block is found.
+var errBlockFound = errors.New("block found")
+
 type TenantDeletionAPI struct {
-	bucketClient objstore.InstrumentedBucket
-	logger       log.Logger
-	cfgProvider  bucket.TenantConfigProvider
+	bucketClient     objstore.InstrumentedBucket
+	iterBucketClient objstore.Bucket
+	logger           log.Logger
+	cfgProvider      bucket.TenantConfigProvider
 }
 
 func NewTenantDeletionAPI(storageCfg cortex_tsdb.BlocksStorageConfig, cfgProvider bucket.TenantConfigProvider, logger log.Logger, reg prometheus.Registerer) (*TenantDeletionAPI, error) {
@@ -31,14 +35,25 @@ func NewTenantDeletionAPI(storageCfg cortex_tsdb.BlocksStorageConfig, cfgProvide
 		return nil, err
 	}
 
-	return newTenantDeletionAPI(bucketClient, cfgProvider, logger), nil
+	iterBucket, err := bucket.NewRawClient(context.Background(), storageCfg.Bucket, "purger-iter", logger)
+	if err != nil {
+		return nil, errors.Wrap(err, "create iter bucket client")
+	}
+	if bwe, ok := iterBucket.(bucket.BucketWithExpectedErrs); ok {
+		iterBucket = bwe.WithExpectedErrs(func(err error) bool {
+			return errors.Is(err, errBlockFound)
+		})
+	}
+
+	return newTenantDeletionAPI(bucketClient, iterBucket, cfgProvider, logger), nil
 }
 
-func newTenantDeletionAPI(bkt objstore.InstrumentedBucket, cfgProvider bucket.TenantConfigProvider, logger log.Logger) *TenantDeletionAPI {
+func newTenantDeletionAPI(bkt objstore.InstrumentedBucket, iterBucket objstore.Bucket, cfgProvider bucket.TenantConfigProvider, logger log.Logger) *TenantDeletionAPI {
 	return &TenantDeletionAPI{
-		bucketClient: bkt,
-		cfgProvider:  cfgProvider,
-		logger:       logger,
+		bucketClient:     bkt,
+		iterBucketClient: iterBucket,
+		cfgProvider:      cfgProvider,
+		logger:           logger,
 	}
 }
 
@@ -46,8 +61,6 @@ func (api *TenantDeletionAPI) DeleteTenant(w http.ResponseWriter, r *http.Reques
 	ctx := r.Context()
 	userID, err := users.TenantID(ctx)
 	if err != nil {
-		// When Cortex is running, it uses Auth Middleware for checking X-Scope-OrgID and injecting tenant into context.
-		// Auth Middleware sends http.StatusUnauthorized if X-Scope-OrgID is missing, so we do too here, for consistency.
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
@@ -55,13 +68,11 @@ func (api *TenantDeletionAPI) DeleteTenant(w http.ResponseWriter, r *http.Reques
 	err = users.WriteTenantDeletionMark(r.Context(), api.bucketClient, userID, users.NewTenantDeletionMark(time.Now()))
 	if err != nil {
 		level.Error(api.logger).Log("msg", "failed to write tenant deletion mark", "user", userID, "err", err)
-
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	level.Info(api.logger).Log("msg", "tenant deletion mark in blocks storage created", "user", userID)
-
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -90,9 +101,7 @@ func (api *TenantDeletionAPI) DeleteTenantStatus(w http.ResponseWriter, r *http.
 }
 
 func (api *TenantDeletionAPI) isBlocksForUserDeleted(ctx context.Context, userID string) (bool, error) {
-	var errBlockFound = errors.New("block found")
-
-	userBucket := bucket.NewUserBucketClient(userID, api.bucketClient, api.cfgProvider)
+	userBucket := bucket.NewUserBucketClient(userID, api.iterBucketClient, api.cfgProvider)
 	err := userBucket.Iter(ctx, "", func(s string) error {
 		s = strings.TrimSuffix(s, "/")
 

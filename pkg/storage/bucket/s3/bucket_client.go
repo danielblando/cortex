@@ -117,6 +117,20 @@ type BucketWithRetries struct {
 	operationRetries int
 	retryMinBackoff  time.Duration
 	retryMaxBackoff  time.Duration
+	isExpectedErr    func(error) bool
+}
+
+// WithExpectedErrs returns a copy of BucketWithRetries that skips retries for
+// errors matching isExpected. The error is still returned to the caller.
+func (b *BucketWithRetries) WithExpectedErrs(isExpected func(error) bool) objstore.Bucket {
+	return &BucketWithRetries{
+		logger:           b.logger,
+		bucket:           b.bucket,
+		operationRetries: b.operationRetries,
+		retryMinBackoff:  b.retryMinBackoff,
+		retryMaxBackoff:  b.retryMaxBackoff,
+		isExpectedErr:    isExpected,
+	}
 }
 
 func (b *BucketWithRetries) Provider() objstore.ObjProvider {
@@ -140,6 +154,9 @@ func (b *BucketWithRetries) retry(ctx context.Context, f func() error, operation
 			return lastErr
 		}
 		if b.bucket.IsObjNotFoundErr(lastErr) || b.bucket.IsAccessDeniedErr(lastErr) {
+			return lastErr
+		}
+		if b.isExpectedErr != nil && b.isExpectedErr(lastErr) {
 			return lastErr
 		}
 		retries.Wait()

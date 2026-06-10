@@ -138,6 +138,25 @@ func NewClient(ctx context.Context, cfg Config, hedgedRoundTripper func(rt http.
 	return iClient, nil
 }
 
+// NewRawClient creates a raw bucket client without metrics or tracing wrapping.
+// Use this when you need direct access to the bucket with retry control (e.g., WithExpectedErrs).
+func NewRawClient(ctx context.Context, cfg Config, name string, logger log.Logger) (objstore.Bucket, error) {
+	switch cfg.Backend {
+	case S3:
+		return s3.NewBucketClient(cfg.S3, nil, name, logger)
+	case GCS:
+		return gcs.NewBucketClient(ctx, cfg.GCS, nil, name, logger)
+	case Azure:
+		return azure.NewBucketClient(cfg.Azure, nil, name, logger)
+	case Swift:
+		return swift.NewBucketClient(cfg.Swift, nil, name, logger)
+	case Filesystem:
+		return filesystem.NewBucketClient(cfg.Filesystem)
+	default:
+		return nil, ErrUnsupportedStorageBackend
+	}
+}
+
 func bucketWithMetrics(bucketClient objstore.Bucket, name string, reg prometheus.Registerer) objstore.Bucket {
 	if reg == nil {
 		return bucketClient
